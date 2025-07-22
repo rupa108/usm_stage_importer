@@ -538,12 +538,6 @@ class RelationProcessorFactoryBase(AbstractFactory):
 
     def __init__(self, source_repository, default_processor_class):
         # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor) -> None
-        """
-        :param repository: An object that provides the relationship data rows.
-        :param processor_provider: A provider that can find CIs and instantiate
-                                   the correct relationship processors.
-        :param reconcile: Whether to run the reconciliation process.
-        """
         cls = type(self)
         mandatory_attrs = [
             "source_bot_name",
