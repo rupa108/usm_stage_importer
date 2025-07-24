@@ -46,16 +46,15 @@ if __name__ == "__main__":
     try:
         factory = MappingProcessorFactory(
             repository=StagingRepository("StagingSystem"),
-            processor_class=SystemProcessor,
+            default_processor_class=SystemProcessor,
             target_bo_name="System",
-            key_field="PK",
-            target_key_field="xSourcePk"
+            source_key="PK",
+            target_key="xSourcePk"
         )
 
         baseline = ReconciliationBaseline(
-            botype_name="System",
-            key_field="xSourcePk",
-            condition="status == 'ACTIVE'"
+            target_bo_name="System",
+            active_condition="status == 'ACTIVE'"
         )
 
         reconciler = Reconciler(baseline=baseline)
