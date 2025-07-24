@@ -16,7 +16,7 @@ structure. It is built on several core principles:
 - **Mark and Sweep Reconciliation**: An optional step can deactivate target
   records that are no longer present in the source data.
 """
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod, abstractproperty
 from de.usu.s3.api import ApiBObject
 import traceback
 
@@ -530,7 +530,7 @@ class RelationProcessorFactoryBase(AbstractFactory):
     source_bo_key_attribute = None
     stage_bo_source_attribute = None
 
-    target_bot_name = None
+    target_bo_name = None
     target_bo_key_attribute = None
     stage_bo_target_attribute = None
 
@@ -539,21 +539,10 @@ class RelationProcessorFactoryBase(AbstractFactory):
     def __init__(self, source_repository, default_processor_class):
         # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor) -> None
         cls = type(self)
-        mandatory_attrs = [
-            "source_bot_name",
-            "source_bo_key_attribute",
-            "stage_bo_source_attribute",
-            "target_bot_name",
-            "target_bo_key_attribute",
-            "stage_bo_target_attribute",
-        ]
-        for attr in mandatory_attrs:
-            if getattr(cls, attr) is None:
-                raise NotImplementedError("Class %s must define the attribute '%s'." % (cls.__name__, attr))
         self.source_bo_type = VM.getBOType(cls.source_bot_name)
-        self.target_bo_type = VM.getBOType(cls.target_bot_name)
+        self.target_bo_type = VM.getBOType(cls.target_bo_name)
 
-        super(RelationProcessorFactory, self).__init__(source_repository, default_processor_class)
+        super(RelationProcessorFactoryBase, self).__init__(source_repository, default_processor_class)
 
 
 
@@ -604,6 +593,19 @@ class RelationProcessorFactoryBase(AbstractFactory):
     def get_summary(self):
         return "Processed relationship links: %d\nFailed rows: %d" % (self.processed_count, self.failed_count)
 
+    # Let abc take care of checking subclasses define these properties as documented above.
+    @abstractproperty
+    def source_bot_name(cls): pass
+    @abstractproperty
+    def source_bo_key_attribute(cls): pass
+    @abstractproperty
+    def stage_bo_source_attribute(cls): pass
+    @abstractproperty
+    def target_bot_name(cls): pass
+    @abstractproperty
+    def target_bo_key_attribute(cls): pass
+    @abstractproperty
+    def stage_bo_target_attribute(cls): pass
 
 # ==============================================================================
 # 5. CONCRETE FACTORY AND REPOSITORY IMPLEMENTATIONS
@@ -674,7 +676,7 @@ class MappingProcessorFactory(AbstractFactory):
     def process_all(self, tr, commit_batch_size=None):
         iterator = self.repository.get_unprocessed_records(tr)
         if commit_batch_size:
-            iterator.committedAfter(commit_batch_size)
+            iterator.commitedAfter(commit_batch_size)
 
         for record in iterator:
             identifier = record.getBOField(self.key_field).getValue()
@@ -723,12 +725,12 @@ class StagingRepository(AbstractRepository):
 # ==============================================================================
 
 class ReconciliationBaseline(AbstractReconciliationBaseline):
-    def __init__(self, target_bot_name, active_condition="status == 'ACTIVE'"):
-        self.target_bot_name = target_bot_name
+    def __init__(self, target_bo_name, active_condition="status == 'ACTIVE'"):
+        self.target_bo_name = target_bo_name
         self.active_condition = active_condition
 
     def get_all_active_records(self, tr):
-        return VM.getBOType(self.target_bot_name).createIterator(tr, self.active_condition)
+        return VM.getBOType(self.target_bo_name).createIterator(tr, self.active_condition)
 
 class Reconciler(AbstractReconciler):
     """
