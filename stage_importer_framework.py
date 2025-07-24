@@ -219,6 +219,7 @@ class AbstractFactory(object):
         self.default_processor_class = default_processor_class
         self.processed_count = 0
         self.failed_count = 0
+        self.active_target_keys = set()
 
     @abstractmethod
     def process_all(self, tr, commit_batch_size=None):
@@ -490,13 +491,11 @@ class RelationshipProcessor(AbstractProcessor):
 
     def process(self):
         rel_attr_name = type(self).rel_attr_name
-        if not rel_attr_name:
-            raise NotImplementedError("Subclasses must define 'rel_attr_name' to specify the relationship attribute.")
         source_bo = self.source
         target_bo = self.target
         rel_field = source_bo.getBOField(rel_attr_name)
-        if rel_field.isCollection():
-            if target_bo and target_bo not in rel_field.getCollection():
+        if rel_field.isCollectionLink():
+            if target_bo:
                 rel_bo = rel_field.linkObject(target_bo)
                 if rel_bo:
                     self.add_touched_object(rel_bo)
@@ -511,7 +510,11 @@ class RelationshipProcessor(AbstractProcessor):
         super(RelationshipProcessor, self).add_touched_object(bo)
 
     def get_active_keys(self):
-        super(RelationshipProcessor, self).get_active_keys()
+        return super(RelationshipProcessor, self).get_active_keys()
+
+    # Let abc take care of checking subclasses define this property as documented above.
+    @abstractproperty
+    def rel_attr_name(cls): pass
 
 class RelationProcessorFactoryBase(AbstractFactory):
     """
@@ -526,7 +529,7 @@ class RelationProcessorFactoryBase(AbstractFactory):
         source and target bos.
     """
     # Subclasses must define these attributes
-    source_bot_name = None
+    source_bo_name = None
     source_bo_key_attribute = None
     stage_bo_source_attribute = None
 
@@ -539,7 +542,7 @@ class RelationProcessorFactoryBase(AbstractFactory):
     def __init__(self, source_repository, default_processor_class):
         # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor) -> None
         cls = type(self)
-        self.source_bo_type = VM.getBOType(cls.source_bot_name)
+        self.source_bo_type = VM.getBOType(cls.source_bo_name)
         self.target_bo_type = VM.getBOType(cls.target_bo_name)
 
         super(RelationProcessorFactoryBase, self).__init__(source_repository, default_processor_class)
@@ -560,7 +563,7 @@ class RelationProcessorFactoryBase(AbstractFactory):
                 log_(traceback.format_exc(), VM.LOG_EXCEPTION, row_bo)
                 self.failed_count += 1
             else:
-                self.processed_count += 1                
+                self.processed_count += 1
 
     def _process_row(self, tr, row_bo):
         """
@@ -587,21 +590,22 @@ class RelationProcessorFactoryBase(AbstractFactory):
         processor.pre_process()
         processor.process()
         processor.post_process()
-        self.add_touched_object(source_bo)
-        self.add_touched_object(target_bo)
+        self.active_target_keys.add(source_bo.getMoniker())
+        self.active_target_keys.add(target_bo.getMoniker())
+        self.active_target_keys.update(processor.get_active_keys())
 
     def get_summary(self):
         return "Processed relationship links: %d\nFailed rows: %d" % (self.processed_count, self.failed_count)
 
     # Let abc take care of checking subclasses define these properties as documented above.
     @abstractproperty
-    def source_bot_name(cls): pass
+    def source_bo_name(cls): pass
     @abstractproperty
     def source_bo_key_attribute(cls): pass
     @abstractproperty
     def stage_bo_source_attribute(cls): pass
     @abstractproperty
-    def target_bot_name(cls): pass
+    def target_bo_name(cls): pass
     @abstractproperty
     def target_bo_key_attribute(cls): pass
     @abstractproperty
@@ -619,7 +623,7 @@ class MappingProcessorFactory(AbstractFactory):
         self.target_bo_name = target_bo_name
         self.key_field = source_key
         self.target_key_field = target_key
-        self.active_target_keys = set()
+
 
     def get_target_key_field(self):
         return self.target_key_field
