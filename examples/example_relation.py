@@ -40,12 +40,12 @@ class SystemToComponentFactory(RelationProcessorFactoryBase):
     source/target business objects.
     """
     # --- Source BO Configuration ---
-    source_bot_name = "System"
+    source_bo_name = "System"
     source_bo_key_attribute = "systemname"
     stage_bo_source_attribute = "src_system_name"
 
     # --- Target BO Configuration ---
-    target_bot_name = "Component"
+    target_bo_name = "Component"
     target_bo_key_attribute = "ident"
     stage_bo_target_attribute = "tgt_component_ident"
 
