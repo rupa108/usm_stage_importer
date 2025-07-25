@@ -234,6 +234,8 @@ class AbstractFactory(object):
 
     def __init__(self, source_repository, default_processor_class):
         # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor) -> None
+        assert isinstance(source_repository, AbstractRepository), "source_repository must be an instance of AbstractRepository"
+        assert issubclass(default_processor_class, AbstractProcessor), "default_processor_class must be a subclass of AbstractProcessor"
         self.repository = source_repository
         self.default_processor_class = default_processor_class
         self.processed_count = 0
@@ -636,7 +638,25 @@ class RelationProcessorFactoryBase(AbstractFactory):
 
 
 class MappingProcessorFactory(AbstractFactory):
+    """A factory that processes records from a repository and applies
+    mapping rules to create or update target business objects.
+    This factory uses a rule-based system to select the appropriate processor
+    for each record based on the defined rules.
+    Arguments:
+        repository (AbstractRepository): An object that provides the records to be processed.
+        default_processor_class (AbstractProcessor): The default processor class to use for processing source records.
+        target_bo_name (str): The name of the target business object type.
+        source_key (str): The key field on the source business object to match against the target.
+        target_key (str): The key field on the target business object to match against the source.
+        rules (list of tuples): A list of tuples where each tuple contains a matcher function and
+            a processor class. The matcher function should take a staging record and return True if it matches
+            the rule. The processor class should be a subclass of AbstractProcessor that will handle the matched
+            records. If no rules are provided, the default_processor_class will be used for all records.
+            The signature of the matcher function should be:
+            `matcher(source_bo: ApiBObject) -> bool`
+    """
     def __init__(self, repository, default_processor_class, target_bo_name, source_key, target_key, rules=None):
+        
         super(MappingProcessorFactory, self).__init__(repository, default_processor_class)
         self.rules = rules if rules else []
         self.target_bo_name = target_bo_name
