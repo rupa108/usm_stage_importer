@@ -57,9 +57,9 @@ def log_(message, level, bo=None):
     A centralized logging function that prints to the console for high-level
     messages and writes to the persistent log for all levels.
     """
-    level_map = {VM.LOG_INFO: "INFO", VM.LOG_WARN: "WARNING", VM.LOG_ERROR: "ERROR", VM.LOG_DEBUG: "DEBUG"}
+    level_map = {VM.LOG_INFO: "INFO", VM.LOG_WARN: "WARNING", VM.LOG_ERROR: "ERROR", VM.LOG_DEBUG: "DEBUG", VM.LOG_EXCEPTION: "EXCEPTION"}
 
-    if level in [VM.LOG_INFO, VM.LOG_WARN, VM.LOG_ERROR]:
+    if level in [VM.LOG_INFO, VM.LOG_WARN, VM.LOG_ERROR, VM.LOG_EXCEPTION]:
         print "%s: %s" % (level_map.get(level, "LOG"), message)
 
     VM.persistentLogMessage("Importer", message, None, None, bo, level, True)
@@ -537,7 +537,26 @@ class RelationshipProcessor(AbstractProcessor):
     @abstractproperty
     def rel_attr_name(cls): pass
 
-class RelationProcessorFactoryBase(AbstractFactory):
+class _RulesMixin(object):
+    def _get_processor_class(self, tr, staging_record):
+        matching_classes = [p_class for matcher, p_class in self.rules if matcher(staging_record)]
+
+        if len(matching_classes) > 1:
+            raise AmbiguousProcessorError(
+                "More than one processor rule matched for record.",
+                matching_processors=[cls.__name__ for cls in matching_classes]
+            )
+
+        processor_class = matching_classes[0] if matching_classes else self.default_processor_class
+
+        if matching_classes:
+            log_("Selected processor '%s' for record." % processor_class.__name__, VM.LOG_DEBUG, staging_record)
+        else:
+            log_("No specific processor matched. Using default: '%s'." % processor_class.__name__, VM.LOG_DEBUG, staging_record)
+
+        return processor_class
+    
+class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
     """
     This is a base class for a relationship processor factory that MUST be subclassed.
     It handles relationships between business objects.
@@ -548,8 +567,15 @@ class RelationProcessorFactoryBase(AbstractFactory):
         source_repository (AbstractRepository): An object that provides the relationship data rows.
         default_processor_class (AbstractProcessor): A processor that creates the relation betwee given
         source and target bos.
+        rules (list of tuples): A list of tuples where each tuple contains a matcher function and
+            a processor class. The matcher function should take a staging record and return True if it matches
+            the rule. The processor class should be a subclass of AbstractProcessor that will handle the matched
+            records. If no rules are provided, the default_processor_class will be used for all records.
+            The signature of the matcher function should be:
+            `matcher(staging_record: Any) -> bool`
     """
-    # Subclasses must define these attributes
+    ###########################################
+    # Subclasses must define these attributes #
     source_bo_name = None
     source_bo_key_attribute = None
     stage_bo_source_attribute = None
@@ -557,17 +583,19 @@ class RelationProcessorFactoryBase(AbstractFactory):
     target_bo_name = None
     target_bo_key_attribute = None
     stage_bo_target_attribute = None
+    ###########################################
 
-
-
-    def __init__(self, source_repository, default_processor_class):
-        # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor) -> None
+    def __init__(self, source_repository, default_processor_class, rules=None):
+        # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor, rules: List[Tuple]) -> None
+        super(RelationProcessorFactoryBase, self).__init__(source_repository, default_processor_class)
         cls = type(self)
         self.source_bo_type = VM.getBOType(cls.source_bo_name)
         self.target_bo_type = VM.getBOType(cls.target_bo_name)
 
-        super(RelationProcessorFactoryBase, self).__init__(source_repository, default_processor_class)
-
+        self.rules = rules if rules else []
+        for func, cls in self.rules:
+            assert callable(func), "Matcher must be a callable function."
+            assert issubclass(cls, AbstractProcessor), "Processor class must be a subclass of AbstractProcessor"
 
 
     def process_all(self, tr, commit_batch_size=None):
@@ -606,7 +634,7 @@ class RelationProcessorFactoryBase(AbstractFactory):
         if not source_bo or not target_bo:
             log_("Source or target BO not found for row: %s" % row_bo.getMoniker(), VM.LOG_WARN, row_bo)
             return
-        ProcessorClass = self.default_processor_class # type: RelationshipProcessor
+        ProcessorClass = self._get_processor_class(tr, row_bo)
         processor = ProcessorClass(tr, source_bo, target_bo)
         processor.pre_process()
         processor.process()
@@ -635,9 +663,8 @@ class RelationProcessorFactoryBase(AbstractFactory):
 # ==============================================================================
 # 5. CONCRETE FACTORY AND REPOSITORY IMPLEMENTATIONS
 # ==============================================================================
-
-
-class MappingProcessorFactory(AbstractFactory):
+        
+class MappingProcessorFactory(_RulesMixin, AbstractFactory):
     """A factory that processes records from a repository and applies
     mapping rules to create or update target business objects.
     This factory uses a rule-based system to select the appropriate processor
@@ -656,7 +683,7 @@ class MappingProcessorFactory(AbstractFactory):
             `matcher(staging_record: Any) -> bool`
     """
     def __init__(self, repository, default_processor_class, target_bo_name, source_key, target_key, rules=None):
-        
+        # type: (repository: AbstractRepository, default_processor_class: AbstractProcessor, target_bo_name: str, source_key: str, target_key: str, rules: List[Tuple]) -> None
         super(MappingProcessorFactory, self).__init__(repository, default_processor_class)
         self.rules = rules if rules else []
         for func, cls in self.rules:
@@ -697,28 +724,6 @@ class MappingProcessorFactory(AbstractFactory):
 
         return target_bo, created
 
-    def _get_processor(self, tr, staging_record):
-        matching_classes = [p_class for matcher, p_class in self.rules if matcher(staging_record)]
-
-        if len(matching_classes) > 1:
-            raise AmbiguousProcessorError(
-                "More than one processor rule matched for record.",
-                matching_processors=[cls.__name__ for cls in matching_classes]
-            )
-
-        processor_class = matching_classes[0] if matching_classes else self.default_processor_class
-
-        if matching_classes:
-            log_("Selected processor '%s' for record." % processor_class.__name__, VM.LOG_DEBUG, staging_record)
-        else:
-            log_("No specific processor matched. Using default: '%s'." % processor_class.__name__, VM.LOG_DEBUG, staging_record)
-
-        target_bo, created = self._get_or_create_target(tr, staging_record)
-        if created:
-            log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, staging_record)
-
-        return processor_class(tr, staging_record, target_bo)
-
     def process_all(self, tr, commit_batch_size=None):
         iterator = self.repository.get_unprocessed_records(tr)
         if commit_batch_size:
@@ -727,8 +732,11 @@ class MappingProcessorFactory(AbstractFactory):
         for record in iterator:
             identifier = record.getBOField(self.source_key).getValue()
             try:
-                processor_instance = self._get_processor(tr, record)
-
+                processor_class = self._get_processor_class(tr, record)
+                target_bo, created = self._get_or_create_target(tr, record)
+                if created:
+                    log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, record)
+                processor_instance = processor_class(tr, record, target_bo)
                 processor_instance.pre_process()
                 processor_instance.process()
                 processor_instance.post_process()
