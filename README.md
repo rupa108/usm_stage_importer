@@ -112,6 +112,7 @@ The framework also supports more advanced scenarios, such as:
 
 *   **`pre_process` and `post_process` hooks**: For custom logic before and after mapping.
 *   **`processor_func`**: For transforming values in-flight.
+    Bonus: If `processor_func` returns **stage_importer_framework.undefined**, mapping is skipped.
 *   **Find-or-Create Logic**: `RelationField` can be configured to create related objects if they don't exist.
 
 ```python
@@ -137,6 +138,7 @@ class AdvancedSystemProcessor(MappingProcessor):
             'isDefault': Static(True)
         }
     )
+    creation_date = StaticField(now(), lambda c, v: v if c.is_create or undefined)
 
     def pre_process(self):
         """Set a default description."""

@@ -21,6 +21,7 @@ from de.usu.s3.api import ApiBObject
 import traceback
 
 
+undefined = object()
 # ==============================================================================
 # 0. CUSTOM EXCEPTIONS
 # ==============================================================================
@@ -113,7 +114,18 @@ class AbstractField(object):
 
     def set_target_field(self, name):
         self.target_field = name
-
+    
+    def set_target_value(self, context, value):
+        """
+        Sets the target field value directly.
+        This is used for static values or when the processor function is not needed.
+        """
+        if not value is undefined:
+            target_bo = context.get_target()
+            target_bo.getBOField(self.target_field).setValue(value)
+        else:
+            log_("Value for field '%s' on source BO '%s' is undefined. Skipping mapping."
+                  % (self.source_field, context.source.getMoniker()), VM.LOG_DEBUG)
     @abstractmethod
     def map_value(self, context):
         # type: (context: ProcessingContext) -> None
@@ -312,28 +324,40 @@ class ProcessingContext(object):
     """Provides a controlled context to a custom processor function."""
     def __init__(self, processor, source_field_name, target_field_name):
         self._processor = processor
-        self._source_field_name = source_field_name
-        self._target_field_name = target_field_name
+        self.source_field_name = source_field_name
+        self.target_field_name = target_field_name
 
     def get_source(self):
         return self._processor.source
+    source = property(get_source)
 
     def get_target(self):
         return self._processor.target
+    target = property(get_target)
 
     def add_touched_object(self, bo):
         self._processor.add_touched_object(bo)
 
     def get_transaction(self):
         return self._processor.transaction
+    transaction = property(get_transaction)
+
+    @property
+    def is_create(self):
+        return self._processor.is_create
+    
+    @property
+    def is_update(self):
+        return self._processor.is_update
 
 class MappingProcessor(AbstractProcessor):
     """Default implementation of a Processor"""
 
-    def __init__(self, tr, source_bo, target_bo):
+    def __init__(self, tr, source_bo, target_bo, is_create=False):
         super(MappingProcessor, self).__init__(tr, source_bo, target_bo)
         self.add_touched_object(target_bo)
-
+        self.is_create = is_create
+        self.is_update = not is_create
 
     def process(self):
         log_("Applying declarative mappings using %s..." % self.__class__.__name__, VM.LOG_DEBUG, self.source)
@@ -371,13 +395,14 @@ class PlainField(AbstractField):
             final_value = self.processor_func(context, source_value)
         else:
             final_value = source_value
-        target_bo = context.get_target()
-        target_bo.getBOField(self.target_field).setValue(final_value)
 
-
+        self.set_target_value(context, final_value)
+            
 class StaticField(AbstractField):
     """A descriptor for setting a static, predefined value on a target field."""
-    def __init__(self, value, processor_func=None):
+    def __init__(self, value=undefined, processor_func=None):
+        if value is undefined:
+            assert self.processor_func, "StaticField must have a value or a processor function defined."
         super(StaticField, self).__init__(source_field=None, processor_func=processor_func)
         self.value = value
 
@@ -387,8 +412,7 @@ class StaticField(AbstractField):
         else:
             final_value = self.value
 
-        target_bo = context.get_target()
-        target_bo.getBOField(self.target_field).setValue(final_value)
+        self.set_target_value(context, final_value)
 
 class RelationField(AbstractField):
     """
@@ -435,6 +459,9 @@ class RelationField(AbstractField):
 
         if self.processor_func:
             related_bo = self.processor_func(context, lookup_value)
+            if related_bo is undefined:
+                log_("Processor function returned undefinded for '%s'. Skipping mapping." % self.source_field, VM.LOG_DEBUG, source_bo)
+                return  
         elif lookup_value:
             related_bo_type = VM.getBOType(self.target_bo_name)
             condition = "%s == '%s'" % (self.target_lookup_field, str(lookup_value).replace("'", "''"))
@@ -453,15 +480,17 @@ class RelationField(AbstractField):
                 raise Exception("Found multiple related objects for '%s' = '%s'. The lookup field must be unique." % (self.target_lookup_field, lookup_value))
 
         target_bo = context.get_target()
-
+        target_field = target_bo.getBOField(self.target_field)
+        
         if related_bo:
-            target_bo.getBOField(self.target_field).linkObject(related_bo)
+            target_field.linkObject(related_bo)
             context.add_touched_object(related_bo)
         else:
             if lookup_value:
                 log_("Could not find or create a related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_WARN, source_bo)
 
-            target_bo.getBOField(self.target_field).setObject(None)
+            if target_field.isObjectLink(): 
+                target_bo.getBOField(self.target_field).setObject(None)
 
 # ==============================================================================
 # 3.2 Helper Classes for RelationField processing
@@ -747,7 +776,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                 target_bo, created = self._get_or_create_target(tr, record)
                 if created:
                     log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, record)
-                processor_instance = processor_class(tr, record, target_bo)
+                processor_instance = processor_class(tr, record, target_bo, created)
                 processor_instance.pre_process()
                 processor_instance.process()
                 processor_instance.post_process()
