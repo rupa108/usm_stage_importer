@@ -115,6 +115,14 @@ The framework also supports more advanced scenarios, such as:
 *   **Find-or-Create Logic**: `RelationField` can be configured to create related objects if they don't exist.
 
 ```python
+def get_location_name(context):
+    tr = context.get_transaction()
+    source_bo = context.get_source()
+    target_bo = context.get_target()
+    # calculate the location name
+    # ...
+    return "my calculated location name"
+
 class AdvancedSystemProcessor(MappingProcessor):
     """A processor demonstrating advanced features."""
     systemname = PlainField(source_field="NAME")
