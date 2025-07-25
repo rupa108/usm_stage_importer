@@ -92,10 +92,21 @@ def get_bo(tr, bo_type, condition, trl_type=VM.TRL_CURRENT, strict=False):
 # ==============================================================================
 
 class AbstractField(object):
-    """Abstract base class for a declarative mapping field."""
+    """
+    Abstract base class for a declarative mapping field.
+   """
     __metaclass__ = ABCMeta
 
     def __init__(self, source_field=None, processor_func=None):
+        # type: (source_field: str, processor_func: callable) -> None
+        """
+        Initializes the field descriptor.
+        Arguments:
+            source_field (str): The name of the field on the source business object.
+            processor_func (callable): An optional function that processes the value
+                before setting it on the target business object. The signature should be:
+                `processor_func(context: ProcessingContext, source_value: Any) -> Any`
+        """
         self.source_field = source_field
         self.target_field = None
         self.processor_func = processor_func
@@ -105,6 +116,13 @@ class AbstractField(object):
 
     @abstractmethod
     def map_value(self, context):
+        # type: (context: ProcessingContext) -> None
+        """ 
+        Maps the value from the source to the target field.
+        
+        Arguments:
+            context (ProcessingContext): The context containing the source and target business objects.
+        """
         pass
 
 
@@ -183,6 +201,7 @@ class AbstractProcessor(object):
 
     @abstractmethod
     def get_active_keys(self):
+        """Returns a set of active keys for the touched objects."""
         keys = set()
         for bo in self._touched_objects:
             keys.add(bo.getMoniker())
