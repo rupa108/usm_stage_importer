@@ -414,8 +414,15 @@ class RelationField(AbstractField):
                 raise TypeError("Value for 'on_not_found_create' must be an instance of a ValueSource class (Static, FromSource, etc.)")
 
             value = value_source.get_value(context)
-            if value is not None:
-                new_bo.getBOField(field).setValue(value)
+            if value is None:
+                continue
+            bo_field = new_bo.getBOField(field)
+            if bo_field.isObjectLink() or bo_field.isCollectionLink():
+                rel_bo = bo_field.linkObject(value)
+                if rel_bo:
+                    context.add_touched_object(rel_bo)
+            else:
+                bo_field.setValue(value)
 
         return new_bo
 
@@ -483,10 +490,14 @@ class FromSource(ValueSource):
 
     def get_value(self, context):
         source_bo = context.get_source()
-        return context.getSource.source.getBOField(self.source_field).getValue()
+        return source_bo.getBOField(self.source_field).getValue()
 
 class FromAnywhere(ValueSource):
-    """An instruction to get a value by executing a custom function."""
+    """
+    An instruction to get a value by executing a custom function.
+    The signature of the function should be:
+        `callable_func(context: ProcessingContext) -> Any`
+    """
     def __init__(self, callable_func):
         self.callable_func = callable_func
 
