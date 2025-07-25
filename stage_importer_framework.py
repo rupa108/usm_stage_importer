@@ -653,27 +653,30 @@ class MappingProcessorFactory(AbstractFactory):
             the rule. The processor class should be a subclass of AbstractProcessor that will handle the matched
             records. If no rules are provided, the default_processor_class will be used for all records.
             The signature of the matcher function should be:
-            `matcher(source_bo: ApiBObject) -> bool`
+            `matcher(staging_record: Any) -> bool`
     """
     def __init__(self, repository, default_processor_class, target_bo_name, source_key, target_key, rules=None):
         
         super(MappingProcessorFactory, self).__init__(repository, default_processor_class)
         self.rules = rules if rules else []
+        for func, cls in self.rules:
+            assert callable(func), "Matcher must be a callable function."
+            assert issubclass(cls, AbstractProcessor), "Processor class must be a subclass of AbstractProcessor"
         self.target_bo_name = target_bo_name
-        self.key_field = source_key
-        self.target_key_field = target_key
+        self.source_key = source_key
+        self.target_key = target_key
 
 
     def get_target_key_field(self):
-        return self.target_key_field
+        return self.target_key
 
     def _get_or_create_target(self, tr, staging_record):
         target_type = VM.getBOType(self.target_bo_name)
-        key_value = staging_record.getBOField(self.key_field).getValue()
+        key_value = staging_record.getBOField(self.source_key).getValue()
         if not key_value:
-            raise ValueError("Key field '%s' is empty." % self.key_field)
+            raise ValueError("Key field '%s' is empty." % self.source_key)
 
-        condition = "%s == '%s'" % (self.target_key_field, str(key_value).replace("'", "''"))
+        condition = "%s == '%s'" % (self.target_key, str(key_value).replace("'", "''"))
         find_result = target_type.find(tr, condition)
 
         target_bo = None
@@ -681,7 +684,7 @@ class MappingProcessorFactory(AbstractFactory):
         if find_result.isOne():
             target_bo = find_result.getBObject()
         elif find_result.isMore():
-            raise Exception("Found multiple target objects for key '%s' = '%s'. Key must be unique." % (self.target_key_field, key_value))
+            raise Exception("Found multiple target objects for key '%s' = '%s'. Key must be unique." % (self.target_key, key_value))
         elif find_result.isNone():
             for bo in tr.getAllNewlyCreatedObjects():
                 if bo.getBOType().getName() == self.target_bo_name and bo.matchCondition(condition):
@@ -722,7 +725,7 @@ class MappingProcessorFactory(AbstractFactory):
             iterator.commitedAfter(commit_batch_size)
 
         for record in iterator:
-            identifier = record.getBOField(self.key_field).getValue()
+            identifier = record.getBOField(self.source_key).getValue()
             try:
                 processor_instance = self._get_processor(tr, record)
 
