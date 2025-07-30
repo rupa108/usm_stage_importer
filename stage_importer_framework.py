@@ -219,7 +219,37 @@ class AbstractProcessor(object):
             keys.add(bo.getMoniker())
         log_("Processor %s collected %d active keys." % (self.__class__.__name__, len(keys)), VM.LOG_DEBUG, self.source)
         return keys
+    
+    @classmethod
+    def _assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition):
+        # type: (tr: ApiTransaction, attr_name: str, bot: ApiBOType, create_attrs: dict, condition: str) -> ApiBObject
+        """
+        Helper method for creating properties of cached business objects.
+        Asserts that a cached business object exists, or creates it if not under the given class attribute name.
+        
+        Attributes:
+            tr (ApiTransaction): The transaction context.
+            attr_name (str): The name of the class attribute to store the cached BO.
+            bot (ApiBOType): The business object type to create or retrieve.
+            create_attrs (dict): Attributes to use when creating a new BO if it does not exist.
+            condition (str): Condition to find the BO in the transaction.
+        """
+        bo = getattr(cls, attr_name)
+        if not bo:
+            bo = get_bo(tr, bot, condition)
+            if not bo:
+                name = create_attrs.pop("name", None)
+                bo = bot.create(**create_attrs)
+                if name:
+                    bo.getBOField("name").setValue(name)
 
+            setattr(cls, attr_name, bo)
+
+        if not tr.containsBO(bo):
+            bo = tr.get(bo)
+
+        return bo
+    
 class AbstractRepository(object):
     """Abstract base class for a repository that provides records to be processed."""
     __metaclass__ = ABCMeta
