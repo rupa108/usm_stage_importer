@@ -286,12 +286,29 @@ class AbstractFactory(object):
 
     @abstractmethod
     def process_all(self, tr, commit_batch_size=None):
+        # type: (tr: ApiTransaction, commit_batch_size: int) -> None
         """
         Contains the main loop and logic for processing all records from the
         repository.
         """
         raise NotImplementedError("Subclasses must implement process_all()")
-
+    
+    @abstractmethod
+    def get_source_bo(self, tr, row_bo):
+        # type: (tr: ApiTransaction, row_bo: ApiBObject) -> ApiBObject
+        """
+        Find and return the source business object.
+        """
+        raise NotImplementedError("Subclasses must implement get_source_bo()")
+    
+    @abstractmethod
+    def get_target_bo(self, tr, row_bo):
+        # type: (tr: ApiTransaction, row_bo: ApiBObject) -> ApiBObject
+        """
+        Find and return the target business object.
+        """
+        raise NotImplementedError("Subclasses must implement get_target_bo()")
+    
     def get_summary(self):
         return "Successfully processed: %d\nFailed: %d" % (self.processed_count, self.failed_count)
 
@@ -684,10 +701,7 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
             else:
                 self.processed_count += 1
 
-    def _process_row(self, tr, row_bo):
-        """
-        Processes a single row from the data source.
-        """
+    def get_source_bo(self, tr, row_bo):
         cls = type(self)
         source_condition = "%s == '%s'" % (
             cls.source_bo_key_attribute,
@@ -695,12 +709,26 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
         )
 
         source_bo = get_bo(tr, self.source_bo_type, source_condition, strict=True)
+        
+        return source_bo
+    
+    def get_target_bo(self, tr, row_bo):
+        cls = type(self)
         target_condition = "%s == '%s'" % (
             cls.target_bo_key_attribute,
             row_bo.getBOField(cls.stage_bo_target_attribute).getValue()
         )
-        target_bo = get_bo(tr, self.target_bo_type, target_condition, strict=True)
 
+        target_bo = get_bo(tr, self.target_bo_type, target_condition, strict=True)
+        
+        return target_bo
+    
+    def _process_row(self, tr, row_bo):
+        """
+        Processes a single row from the data source.
+        """
+        source_bo = self.get_source_bo(tr, row_bo)
+        target_bo = self.get_target_bo(tr, row_bo)
         if not source_bo or not target_bo:
             log_("Source or target BO not found for row: %s" % row_bo.getMoniker(), VM.LOG_WARN, row_bo)
             return
@@ -760,37 +788,27 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             assert callable(func), "Matcher must be a callable function."
             assert issubclass(cls, AbstractProcessor), "Processor class must be a subclass of AbstractProcessor"
         self.target_bo_name = target_bo_name
+        self.target_type = VM.getBOType(target_bo_name)
         self.source_key = source_key
         self.target_key = target_key
 
-
-    def get_target_key_field(self):
-        return self.target_key
-
+    def get_source_bo(self, tr, row_bo):
+        return row_bo
+    
+    def get_target_bo(self, tr, row_bo):
+        key_value = row_bo.getBOField(self.source_key).getValue()
+        condition = "%s == '%s'" % (self.target_key, key_value)
+        target_bo = get_bo(tr, self.target_type, condition, strict=True)
+        return target_bo
+    
     def _get_or_create_target(self, tr, staging_record):
-        target_type = VM.getBOType(self.target_bo_name)
-        key_value = staging_record.getBOField(self.source_key).getValue()
-        if not key_value:
-            raise ValueError("Key field '%s' is empty." % self.source_key)
-
-        condition = "%s == '%s'" % (self.target_key, str(key_value).replace("'", "''"))
-        find_result = target_type.find(tr, condition)
-
-        target_bo = None
-        created = False
-        if find_result.isOne():
-            target_bo = find_result.getBObject()
-        elif find_result.isMore():
-            raise Exception("Found multiple target objects for key '%s' = '%s'. Key must be unique." % (self.target_key, key_value))
-        elif find_result.isNone():
-            for bo in tr.getAllNewlyCreatedObjects():
-                if bo.getBOType().getName() == self.target_bo_name and bo.matchCondition(condition):
-                    target_bo = bo
-                    break
-
+        target_bo = self.get_target_bo(tr, staging_record) 
+        
         if not target_bo:
-            target_bo = target_type.createBO(tr,1)
+            target_bo = self.target_type.createBO(tr,1)
             created = True
+        else:
+            created = False
 
         return target_bo, created
 
