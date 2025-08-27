@@ -791,6 +791,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         self.target_type = VM.getBOType(target_bo_name)
         self.source_key = source_key
         self.target_key = target_key
+        self.generate_key = True
 
     def get_source_bo(self, tr, row_bo):
         return row_bo
@@ -805,7 +806,11 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         target_bo = self.get_target_bo(tr, staging_record) 
         
         if not target_bo:
-            target_bo = self.target_type.createBO(tr,1)
+            if self.generate_key:
+              args = [tr, 1]
+            else:
+              args = [tr, 0]
+            target_bo = self.target_type.createBO(*args)
             created = True
         else:
             created = False
