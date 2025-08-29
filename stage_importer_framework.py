@@ -98,7 +98,7 @@ class AbstractField(object):
    """
     __metaclass__ = ABCMeta
 
-    def __init__(self, source_field=None, processor_func=None):
+    def __init__(self, source_field=None, processor_func=None, match_key=False):
         # type: (source_field: str, processor_func: callable) -> None
         """
         Initializes the field descriptor.
@@ -111,10 +111,11 @@ class AbstractField(object):
         self.source_field = source_field
         self.target_field = None
         self.processor_func = processor_func
+        self.match_key = match_key
 
     def set_target_field(self, name):
         self.target_field = name
-    
+
     def set_target_value(self, context, value):
         """
         Sets the target field value directly.
@@ -129,9 +130,9 @@ class AbstractField(object):
     @abstractmethod
     def map_value(self, context):
         # type: (context: ProcessingContext) -> None
-        """ 
+        """
         Maps the value from the source to the target field.
-        
+
         Arguments:
             context (ProcessingContext): The context containing the source and target business objects.
         """
@@ -145,6 +146,9 @@ class ProcessorMetaclass(ABCMeta):
     """
     def __new__(cls, name, bases, attrs):
         ordered_descriptors = []
+        class_meta = attrs.pop("Meta", type("Meta", (), {}))
+        meta = class_meta()
+
 
         if '__processing_order__' in attrs:
             # If order is specified, enforce it
@@ -171,7 +175,9 @@ class ProcessorMetaclass(ABCMeta):
         for each in ordered_descriptors:
             del attrs[each.target_field]
 
-        attrs['_ordered_descriptors'] = ordered_descriptors
+        meta.fields = ordered_descriptors
+        attrs["meta"] = meta
+
         return super(ProcessorMetaclass, cls).__new__(cls, name, bases, attrs)
 
 
@@ -219,14 +225,14 @@ class AbstractProcessor(object):
             keys.add(bo.getMoniker())
         log_("Processor %s collected %d active keys." % (self.__class__.__name__, len(keys)), VM.LOG_DEBUG, self.source)
         return keys
-    
+
     @classmethod
     def _assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition):
         # type: (tr: ApiTransaction, attr_name: str, bot: ApiBOType, create_attrs: dict, condition: str) -> ApiBObject
         """
         Helper method for creating properties of cached business objects.
         Asserts that a cached business object exists, or creates it if not under the given class attribute name.
-        
+
         Attributes:
             tr (ApiTransaction): The transaction context.
             attr_name (str): The name of the class attribute to store the cached BO.
@@ -249,7 +255,16 @@ class AbstractProcessor(object):
             bo = tr.get(bo)
 
         return bo
-    
+
+    @classmethod
+    def get_match_key(cls):
+        result = None
+        for field in getattr(cls.meta, "fields", []):
+            if field.match_key:
+                result = field
+        return result
+
+
 class AbstractRepository(object):
     """Abstract base class for a repository that provides records to be processed."""
     __metaclass__ = ABCMeta
@@ -292,7 +307,7 @@ class AbstractFactory(object):
         repository.
         """
         raise NotImplementedError("Subclasses must implement process_all()")
-    
+
     @abstractmethod
     def get_source_bo(self, tr, row_bo):
         # type: (tr: ApiTransaction, row_bo: ApiBObject) -> ApiBObject
@@ -300,7 +315,7 @@ class AbstractFactory(object):
         Find and return the source business object.
         """
         raise NotImplementedError("Subclasses must implement get_source_bo()")
-    
+
     @abstractmethod
     def get_target_bo(self, tr, row_bo):
         # type: (tr: ApiTransaction, row_bo: ApiBObject) -> ApiBObject
@@ -308,7 +323,7 @@ class AbstractFactory(object):
         Find and return the target business object.
         """
         raise NotImplementedError("Subclasses must implement get_target_bo()")
-    
+
     def get_summary(self):
         return "Successfully processed: %d\nFailed: %d" % (self.processed_count, self.failed_count)
 
@@ -392,7 +407,7 @@ class ProcessingContext(object):
     @property
     def is_create(self):
         return self._processor.is_create
-    
+
     @property
     def is_update(self):
         return self._processor.is_update
@@ -411,7 +426,7 @@ class MappingProcessor(AbstractProcessor):
         if not hasattr(self, '__processing_order__'):
             log_("`__processing_order__` not defined for %s. Field processing order is not guaranteed." % self.__class__.__name__, VM.LOG_DEBUG, self.source)
 
-        for descriptor in self._ordered_descriptors:
+        for descriptor in self.meta.fields:
             try:
                 context = ProcessingContext(self, descriptor.source_field, descriptor.target_field)
                 descriptor.map_value(context)
@@ -444,13 +459,13 @@ class PlainField(AbstractField):
             final_value = source_value
 
         self.set_target_value(context, final_value)
-            
+
 class StaticField(AbstractField):
     """A descriptor for setting a static, predefined value on a target field."""
-    def __init__(self, value=undefined, processor_func=None):
+    def __init__(self, value=undefined, processor_func=None, **kwargs):
         if value is undefined:
             assert self.processor_func, "StaticField must have a value or a processor function defined."
-        super(StaticField, self).__init__(source_field=None, processor_func=processor_func)
+        super(StaticField, self).__init__(source_field=None, processor_func=processor_func, **kwargs)
         self.value = value
 
     def map_value(self, context):
@@ -466,8 +481,8 @@ class RelationField(AbstractField):
     A descriptor for mapping a value to a related Business Object.
     It supports find-or-create logic for the related object.
     """
-    def __init__(self, source_field, target_bo_name, target_lookup_field="name", on_not_found_create=None, processor_func=None):
-        super(RelationField, self).__init__(source_field, processor_func)
+    def __init__(self, source_field, target_bo_name, target_lookup_field="name", on_not_found_create=None, processor_func=None, **kwargs):
+        super(RelationField, self).__init__(source_field, processor_func, **kwargs)
         self.target_bo_name = target_bo_name
         self.target_lookup_field = target_lookup_field
         self.on_not_found_create = on_not_found_create
@@ -508,7 +523,7 @@ class RelationField(AbstractField):
             related_bo = self.processor_func(context, lookup_value)
             if related_bo is undefined:
                 log_("Processor function returned undefinded for '%s'. Skipping mapping." % self.source_field, VM.LOG_DEBUG, source_bo)
-                return  
+                return
         elif lookup_value:
             related_bo_type = VM.getBOType(self.target_bo_name)
             condition = "%s == '%s'" % (self.target_lookup_field, str(lookup_value).replace("'", "''"))
@@ -528,7 +543,7 @@ class RelationField(AbstractField):
 
         target_bo = context.get_target()
         target_field = target_bo.getBOField(self.target_field)
-        
+
         if related_bo:
             target_field.linkObject(related_bo)
             context.add_touched_object(related_bo)
@@ -536,7 +551,7 @@ class RelationField(AbstractField):
             if lookup_value:
                 log_("Could not find or create a related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_WARN, source_bo)
 
-            if target_field.isObjectLink(): 
+            if target_field.isObjectLink():
                 target_bo.getBOField(self.target_field).setObject(None)
 
 # ==============================================================================
@@ -642,7 +657,7 @@ class _RulesMixin(object):
             log_("No specific processor matched. Using default: '%s'." % processor_class.__name__, VM.LOG_DEBUG, staging_record)
 
         return processor_class
-    
+
 class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
     """
     This is a base class for a relationship processor factory that MUST be subclassed.
@@ -709,9 +724,9 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
         )
 
         source_bo = get_bo(tr, self.source_bo_type, source_condition, strict=True)
-        
+
         return source_bo
-    
+
     def get_target_bo(self, tr, row_bo):
         cls = type(self)
         target_condition = "%s == '%s'" % (
@@ -720,9 +735,9 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
         )
 
         target_bo = get_bo(tr, self.target_bo_type, target_condition, strict=True)
-        
+
         return target_bo
-    
+
     def _process_row(self, tr, row_bo):
         """
         Processes a single row from the data source.
@@ -761,7 +776,7 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
 # ==============================================================================
 # 5. CONCRETE FACTORY AND REPOSITORY IMPLEMENTATIONS
 # ==============================================================================
-        
+
 class MappingProcessorFactory(_RulesMixin, AbstractFactory):
     """A factory that processes records from a repository and applies
     mapping rules to create or update target business objects.
@@ -780,31 +795,43 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             The signature of the matcher function should be:
             `matcher(staging_record: Any) -> bool`
     """
-    def __init__(self, repository, default_processor_class, target_bo_name, source_key, target_key, rules=None):
+    def __init__(self, repository, default_processor_class, target_bo_name=None, source_key=None, target_key=None, rules=None):
         # type: (repository: AbstractRepository, default_processor_class: AbstractProcessor, target_bo_name: str, source_key: str, target_key: str, rules: List[Tuple]) -> None
         super(MappingProcessorFactory, self).__init__(repository, default_processor_class)
         self.rules = rules if rules else []
         for func, cls in self.rules:
             assert callable(func), "Matcher must be a callable function."
             assert issubclass(cls, AbstractProcessor), "Processor class must be a subclass of AbstractProcessor"
-        self.target_bo_name = target_bo_name
-        self.target_type = VM.getBOType(target_bo_name)
-        self.source_key = source_key
-        self.target_key = target_key
+        self.target_bo_name = getattr(default_processor_class.meta, "target_bo_name", None)
+        if not self.target_bo_name:
+            assert target_bo_name, "No target_bo_name in processor class. target_bo_name argument must be provided!"
+            self.target_bo_name = target_bo_name
+        self.target_type = VM.getBOType(self.target_bo_name)
+
+        field = default_processor_class.get_match_key() # type: AbstractField
+        if field:
+            self.source_key = field.source_field
+            self.target_key = field.target_field
+        else:
+            assert source_key, "No match_key in processor class. source_key argument must be provided!"
+            assert target_key, "No match_key in processor class. target_key argument must be provided!"
+            self.source_key = source_key
+            self.target_key = target_key
+
         self.generate_key = True
 
     def get_source_bo(self, tr, row_bo):
         return row_bo
-    
+
     def get_target_bo(self, tr, row_bo):
         key_value = row_bo.getBOField(self.source_key).getValue()
         condition = "%s == '%s'" % (self.target_key, key_value)
         target_bo = get_bo(tr, self.target_type, condition, strict=True)
         return target_bo
-    
+
     def _get_or_create_target(self, tr, staging_record):
-        target_bo = self.get_target_bo(tr, staging_record) 
-        
+        target_bo = self.get_target_bo(tr, staging_record)
+
         if not target_bo:
             if self.generate_key:
               args = [tr, 1]
@@ -838,7 +865,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
 
                 self._mark_as_processed(record, "PROCESSED", processor_instance.message)
                 self.processed_count += 1
-                log_("Success: %s" % processor_instance.message, VM.LOG_INFO, record)
+                #log_("Success: %s" % processor_instance.message, VM.LOG_INFO, record)
             except Exception as e:
                 self.failed_count += 1
                 error_message = str(e)
