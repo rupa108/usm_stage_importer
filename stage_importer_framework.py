@@ -17,7 +17,6 @@ structure. It is built on several core principles:
   records that are no longer present in the source data.
 """
 from abc import ABCMeta, abstractmethod, abstractproperty
-from de.usu.s3.api import ApiBObject
 import traceback
 
 
@@ -658,7 +657,7 @@ class _RulesMixin(object):
 
         return processor_class
 
-class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
+class RelationProcessorFactory(_RulesMixin, AbstractFactory):
     """
     This is a base class for a relationship processor factory that MUST be subclassed.
     It handles relationships between business objects.
@@ -677,7 +676,7 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
             `matcher(staging_record: Any) -> bool`
     """
     ###########################################
-    # Subclasses must define these attributes #
+    # Subclasses may define these attributes #
     source_bo_name = None
     source_bo_key_attribute = None
     stage_bo_source_attribute = None
@@ -687,12 +686,28 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
     stage_bo_target_attribute = None
     ###########################################
 
+    def _get_config(self, processor_class):
+        # Prefer .meta on processor_class if present, else fallback to factory attributes
+        obj = getattr(processor_class, 'meta', None)
+        if obj is None:
+            obj = type(self)
+        return {
+            'source_bo_name': getattr(obj, 'source_bo_name', None),
+            'source_bo_key_attribute': getattr(obj, 'source_bo_key_attribute', None),
+            'stage_bo_source_attribute': getattr(obj, 'stage_bo_source_attribute', None),
+            'target_bo_name': getattr(obj, 'target_bo_name', None),
+            'target_bo_key_attribute': getattr(obj, 'target_bo_key_attribute', None),
+            'stage_bo_target_attribute': getattr(obj, 'stage_bo_target_attribute', None),
+        }
+
     def __init__(self, source_repository, default_processor_class, rules=None):
         # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor, rules: List[Tuple]) -> None
-        super(RelationProcessorFactoryBase, self).__init__(source_repository, default_processor_class)
-        cls = type(self)
-        self.source_bo_type = VM.getBOType(cls.source_bo_name)
-        self.target_bo_type = VM.getBOType(cls.target_bo_name)
+        super(RelationProcessorFactory, self).__init__(source_repository, default_processor_class)
+        # Use config from Meta if present, else fallback to factory attributes
+        self.config = self._get_config(default_processor_class)
+
+        self.source_bo_type = VM.getBOType(self.config['source_bo_name'])
+        self.target_bo_type = VM.getBOType(self.config['target_bo_name'])
 
         self.rules = rules if rules else []
         for func, cls in self.rules:
@@ -716,26 +731,22 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
             else:
                 self.processed_count += 1
 
+
     def get_source_bo(self, tr, row_bo):
-        cls = type(self)
         source_condition = "%s == '%s'" % (
-            cls.source_bo_key_attribute,
-            row_bo.getBOField(cls.stage_bo_source_attribute).getValue()
+            self.config['source_bo_key_attribute'],
+            row_bo.getBOField(self.config['stage_bo_source_attribute']).getValue()
         )
-
         source_bo = get_bo(tr, self.source_bo_type, source_condition, strict=True)
-
         return source_bo
 
+
     def get_target_bo(self, tr, row_bo):
-        cls = type(self)
         target_condition = "%s == '%s'" % (
-            cls.target_bo_key_attribute,
-            row_bo.getBOField(cls.stage_bo_target_attribute).getValue()
+            self.config['target_bo_key_attribute'],
+            row_bo.getBOField(self.config['stage_bo_target_attribute']).getValue()
         )
-
         target_bo = get_bo(tr, self.target_bo_type, target_condition, strict=True)
-
         return target_bo
 
     def _process_row(self, tr, row_bo):
@@ -760,18 +771,7 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
         return "Processed relationship links: %d\nFailed rows: %d" % (self.processed_count, self.failed_count)
 
     # Let abc take care of checking subclasses define these properties as documented above.
-    @abstractproperty
-    def source_bo_name(cls): pass
-    @abstractproperty
-    def source_bo_key_attribute(cls): pass
-    @abstractproperty
-    def stage_bo_source_attribute(cls): pass
-    @abstractproperty
-    def target_bo_name(cls): pass
-    @abstractproperty
-    def target_bo_key_attribute(cls): pass
-    @abstractproperty
-    def stage_bo_target_attribute(cls): pass
+
 
 # ==============================================================================
 # 5. CONCRETE FACTORY AND REPOSITORY IMPLEMENTATIONS
@@ -985,7 +985,7 @@ class ImportOrchestrator(object):
 
     
 class TestStageSystemProcessor(MappingProcessor):
-    __processiong_order__ = ("name", "systype", "status","compsystems")
+    __processing_order__ = ("name", "systype", "status","compsystems")
     name = PlainField(source_field="stageName")
     status = PlainField(source_field="stageStatus")
     systype = RelationField(source_field="stageType",target_bo_name="Systype", target_lookup_field="systype")

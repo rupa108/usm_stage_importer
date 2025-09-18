@@ -11,7 +11,7 @@ import traceback
 from stage_importer_framework import (
     ImportOrchestrator,
     StagingRepository,
-    RelationProcessorFactoryBase,
+    RelationProcessorFactory,
     RelationshipProcessor,
     log_
 )
@@ -32,7 +32,7 @@ class SystemToComponentProcessor(RelationshipProcessor):
 # 2. CONCRETE RELATIONSHIP FACTORY
 # ==============================================================================
 
-class SystemToComponentFactory(RelationProcessorFactoryBase):
+class SystemToComponentFactory(RelationProcessorFactory):
     """
     A factory for creating System-to-Component relationships.
 
