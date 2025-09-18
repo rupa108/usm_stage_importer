@@ -110,14 +110,24 @@ class AdvancedSystemProcessor(MappingProcessor):
 # 3. MAIN EXECUTION BLOCK
 # ==============================================================================
 
+def match_zdv(source_record):
+    """A custom matching function for ZdV records."""
+    return source_record.getBOField("APP_TYPE").getValue() == "ZDV"
+
+def match_bms(source_record):
+    """A custom matching function for BMS records."""
+    return source_record.getBOField("APP_TYPE").getValue() == "BMS"
+
+
 if __name__ == "__main__":
     try:
         factory = MappingProcessorFactory(
             repository=StagingRepository("StagingAdvancedSystems"),
-            processor_class=AdvancedSystemProcessor,
+            default_processor_class=AdvancedSystemProcessor,
             target_bo_name="System",
-            key_field="PK",
-            target_key_field="xSourcePk"
+            source_key="PK",
+            target_key="xForeignId",
+            rules=((match_zdv, ZdVProcessor), (match_bms, BMSProcessor))
         )
 
         orchestrator = ImportOrchestrator(factories=[factory])
