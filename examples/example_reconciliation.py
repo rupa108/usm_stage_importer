@@ -67,10 +67,10 @@ if __name__ == "__main__":
         log_("===== SCENARIO 1: STANDARD RECONCILIATION =====", VM.LOG_INFO)
         system_factory = MappingProcessorFactory(
             repository=StagingRepository("StagingSystem"),
-            processor_class=SystemProcessor,
+            default_processor_class=SystemProcessor,
             target_bo_name="System",
-            key_field="PK",
-            target_key_field="xSourcePk"
+            source_key="PK",
+            target_key="xSourcePk"
         )
         system_baseline = ReconciliationBaseline("System", "xSourcePk", "status == 'ACTIVE'")
         system_reconciler = SystemReconciler(system_baseline)
@@ -85,10 +85,10 @@ if __name__ == "__main__":
         log_("===== SCENARIO 2: CUSTOM RECONCILIATION =====", VM.LOG_INFO)
         component_factory = MappingProcessorFactory(
             repository=StagingRepository("StagingComponent"),
-            processor_class=ComponentProcessor,
+            default_processor_class=ComponentProcessor,
             target_bo_name="Component",
-            key_field="PK",
-            target_key_field="xSourcePk"
+            source_key="PK",
+            target_key="xSourcePk"
         )
         component_baseline = ReconciliationBaseline("Component", "xSourcePk", "validto IS NULL")
         component_reconciler = ComponentReconciler(component_baseline)
