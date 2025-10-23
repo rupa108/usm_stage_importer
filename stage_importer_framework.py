@@ -613,6 +613,7 @@ class RelationshipProcessor(AbstractProcessor):
     rel_attr_name = None  # The name of the relationship attribute on the source BO.
 
     def process(self):
+        rel_bo = None
         rel_attr_name = type(self).rel_attr_name
         source_bo = self.source
         target_bo = self.target
@@ -624,7 +625,9 @@ class RelationshipProcessor(AbstractProcessor):
                     self.add_touched_object(rel_bo)
         else:
             rel_field.setObject(target_bo)
-
+        
+        return rel_bo
+    
     def pre_process(self): pass
 
     def post_process(self): pass
