@@ -58,12 +58,12 @@ def log_(message, level, bo=None):
     A centralized logging function that prints to the console for high-level
     messages and writes to the persistent log for all levels.
     """
-    level_map = {VM.LOG_INFO: "INFO", VM.LOG_WARN: "WARNING", VM.LOG_ERROR: "ERROR", VM.LOG_DEBUG: "DEBUG", VM.LOG_EXCEPTION: "EXCEPTION"}
+    level_map = {VM.LOG_INFO: "INFO", VM.LOG_WARN: "WARNING", VM.LOG_ERROR: "ERROR", VM.LOG_DEBUG: "DEBUG", VM.LOG_EXCEPTION: "EXCEPTION", VM.LOG_FINER: "DEBUG_DETAIL", VM.LOG_FINEST: "TRACE"}
 
     if level in [VM.LOG_INFO, VM.LOG_WARN, VM.LOG_ERROR, VM.LOG_EXCEPTION]:
         print "%s: %s" % (level_map.get(level, "LOG"), message)
 
-    VM.persistentLogMessage("Importer", message, None, None, bo, level, True)
+    VM.persistentLogMessage("Importer", message, None, None, bo, level, False)
 
 
 def get_bo(tr, bo_type, condition, trl_type=VM.TRL_CURRENT, strict=False):
@@ -126,7 +126,7 @@ class AbstractField(object):
             target_bo.getBOField(self.target_field).setValue(value)
         else:
             log_("Value for field '%s' on source BO '%s' is undefined. Skipping mapping."
-                  % (self.source_field, context.source.getMoniker()), VM.LOG_DEBUG)
+                  % (self.source_field, context.source.getMoniker()), VM.LOG_FINER)
     @abstractmethod
     def map_value(self, context):
         # type: (context: ProcessingContext) -> None
@@ -422,9 +422,9 @@ class MappingProcessor(AbstractProcessor):
         self.is_update = not is_create
 
     def process(self):
-        log_("Applying declarative mappings using %s..." % self.__class__.__name__, VM.LOG_DEBUG, self.source)
+        log_("Applying declarative mappings using %s..." % self.__class__.__name__, VM.LOG_FINER, self.source)
         if not hasattr(self, '__processing_order__'):
-            log_("`__processing_order__` not defined for %s. Field processing order is not guaranteed." % self.__class__.__name__, VM.LOG_DEBUG, self.source)
+            log_("`__processing_order__` not defined for %s. Field processing order is not guaranteed." % self.__class__.__name__, VM.LOG_FINER, self.source)
 
         for descriptor in self.meta.fields:
             try:
@@ -450,6 +450,19 @@ class MappingProcessor(AbstractProcessor):
 
 class PlainField(AbstractField):
     """A descriptor for mapping simple, direct field-to-field values."""
+
+    def __init__(self, source_field, processor_func=None, match_key=False, **kwargs):
+        # type: (source_field: str, processor_func: callable) -> None
+        """
+        Initializes the field descriptor.
+        Arguments:
+            source_field (str): The name of the field on the source business object.
+            processor_func (callable): An optional function that processes the value
+                before setting it on the target business object. The signature should be:
+                `processor_func(context: ProcessingContext, source_value: Any) -> Any`
+        """
+        super(PlainField, self).__init__(source_field=source_field, processor_func=processor_func, match_key=match_key, **kwargs)
+
     def map_value(self, context):
         source_bo = context.get_source()
         source_value = source_bo.getBOField(self.source_field).getValue()
@@ -464,8 +477,8 @@ class StaticField(AbstractField):
     """A descriptor for setting a static, predefined value on a target field."""
     def __init__(self, value=undefined, processor_func=None, **kwargs):
         if value is undefined:
-            assert self.processor_func, "StaticField must have a value or a processor function defined."
-        super(StaticField, self).__init__(source_field=None, processor_func=processor_func, **kwargs)
+            assert processor_func, "StaticField must have a value or a processor function defined."
+        super(StaticField, self).__init__(processor_func=processor_func, **kwargs)
         self.value = value
 
     def map_value(self, context):
@@ -823,7 +836,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             self.source_key = source_key
             self.target_key = target_key
 
-        self.generate_key = True
+        self.generate_key = True if self.target_type.getBusinessKeyAttrName() else False
 
     def get_source_bo(self, tr, row_bo):
         return row_bo
@@ -838,11 +851,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         target_bo = self.get_target_bo(tr, staging_record)
 
         if not target_bo:
-            if self.generate_key:
-              args = [tr, 1]
-            else:
-              args = [tr, 0]
-            target_bo = self.target_type.createBO(*args)
+            target_bo = self.target_type.createBO(tr, self.generate_key)
             created = True
         else:
             created = False
