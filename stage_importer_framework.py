@@ -475,25 +475,27 @@ class StaticField(AbstractField):
             final_value = self.value
 
         self.set_target_value(context, final_value)
-
 class RelationField(AbstractField):
     """
     A descriptor for mapping a value to a related Business Object.
     It supports find-or-create logic for the related object.
     """
-    def __init__(self, source_field, target_bo_name, target_lookup_field="name", on_not_found_create=None, processor_func=None, **kwargs):
+    def __init__(self, source_field, target_bo_name, target_lookup_field=None, on_not_found_create=None, processor_func=None, target_lookup_func=None, **kwargs):
         super(RelationField, self).__init__(source_field, processor_func, **kwargs)
         self.target_bo_name = target_bo_name
+        self.target_type = VM.getBOType(target_bo_name)
         self.target_lookup_field = target_lookup_field
         self.on_not_found_create = on_not_found_create
+        self.generate_key = True if self.target_type.getBusinessKeyAttrName() else False
+        self.target_lookup_func = target_lookup_func
 
     def _create_related_bo(self, context, lookup_value):
         """Creates a new related BO based on the on_not_found_create config."""
         source_bo = context.get_source()
         log_("Creating new related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_INFO, source_bo)
-        related_bo_type = VM.getBOType(self.target_bo_name)
+
         tr = context.get_transaction()
-        new_bo = related_bo_type.createBO(tr, 1)
+        new_bo = self.target_type.createBO(tr, self.generate_key)
 
         for field, value_source in self.on_not_found_create.items():
             if not isinstance(value_source, ValueSource):
@@ -514,35 +516,38 @@ class RelationField(AbstractField):
 
     def map_value(self, context):
         """Finds or creates a related BO and sets the relation on the target BO."""
-        tr = context.get_transaction()
         source_bo = context.get_source()
-        related_bo = None
         lookup_value = source_bo.getBOField(self.source_field).getValue()
+        target_bo = context.get_target()
+        target_field = target_bo.getBOField(self.target_field)
+
+        if not lookup_value:
+            if target_field.isObjectLink():
+                target_field.setObject(None)
+
+            return
+
+        tr = context.get_transaction()
+        related_bo = None
+        lookup = None
 
         if self.processor_func:
             related_bo = self.processor_func(context, lookup_value)
             if related_bo is undefined:
-                log_("Processor function returned undefinded for '%s'. Skipping mapping." % self.source_field, VM.LOG_DEBUG, source_bo)
+                log_("Processor function returned undefinded for '%s'. Skipping mapping." % self.source_field, VM.LOG_FINER, source_bo)
                 return
-        elif lookup_value:
-            related_bo_type = VM.getBOType(self.target_bo_name)
-            condition = "%s == '%s'" % (self.target_lookup_field, str(lookup_value).replace("'", "''"))
-            find_result = related_bo_type.find(tr, condition)
+        elif self.target_lookup_field:
+            condition = "%s == '%s'" % (self.target_lookup_field, lookup_value)
+            related_bo = get_bo(tr, self.target_type, condition, strict=True)
+            if not related_bo and self.on_not_found_create and lookup_value:
+                related_bo = self._create_related_bo(context, lookup_value)
+        elif self.target_lookup_func:
+            condition = self.target_lookup_func(context, lookup_value)
+            related_bo = get_bo(tr, self.target_type, condition, strict=True)
+            if not related_bo and self.on_not_found_create and lookup_value:
+                related_bo = self._create_related_bo(context, lookup_value)
 
-            if find_result.isOne():
-                related_bo = find_result.getBObject()
-            elif find_result.isNone():
-                for bo in tr.getAllNewlyCreatedObjects():
-                    if bo.getBOType().getName() == self.target_bo_name and bo.matchCondition(condition):
-                        related_bo = bo
-                        break
-                if not related_bo and self.on_not_found_create:
-                    related_bo = self._create_related_bo(context, lookup_value)
-            elif find_result.isMore():
-                raise Exception("Found multiple related objects for '%s' = '%s'. The lookup field must be unique." % (self.target_lookup_field, lookup_value))
 
-        target_bo = context.get_target()
-        target_field = target_bo.getBOField(self.target_field)
 
         if related_bo:
             target_field.linkObject(related_bo)
@@ -550,9 +555,6 @@ class RelationField(AbstractField):
         else:
             if lookup_value:
                 log_("Could not find or create a related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_WARN, source_bo)
-
-            if target_field.isObjectLink():
-                target_bo.getBOField(self.target_field).setObject(None)
 
 # ==============================================================================
 # 3.2 Helper Classes for RelationField processing
