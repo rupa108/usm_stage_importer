@@ -88,6 +88,28 @@ def get_bo(tr, bo_type, condition, trl_type=VM.TRL_CURRENT, strict=False):
 
     return result
 
+def link_nm(source, target, rel_name, **kwargs):
+    # type: (source: ApiBObject, target: ApiBObject, rel_name: str) -> ApiBObject
+    """We had strage issues with the ApiGOField.linkObject() method in some cases.
+    This is a helper method that reliably creates links between two business objects.
+    Creates a link between two business objects in a collection relationship.
+    If the target is not already linked, it adds it to the collection.
+    Returns the link object.
+    """
+    assert source is not None
+    assert target is not None
+    f_coll = source.getBOField(rel_name)
+    coll = f_coll.getCollection()
+    i = coll.indexOf(target)
+    if i < 0:
+        coll.add(target)
+    link = coll.linkItem(coll.indexOf(target))
+    if kwargs:
+        for key, value in kwargs.items():
+            link.getBOField(key).setValue(value)
+
+    return link
+
 # ==============================================================================
 # 2. CORE LIBRARY ABSTRACT CLASSES
 # ==============================================================================
@@ -494,13 +516,14 @@ class RelationField(AbstractField):
     It supports find-or-create logic for the related object.
     """
     def __init__(self, source_field, target_bo_name, target_lookup_field=None, on_not_found_create=None, processor_func=None, target_lookup_func=None, **kwargs):
-        super(RelationField, self).__init__(source_field, processor_func, **kwargs)
+        super(RelationField, self).__init__(source_field, processor_func)
         self.target_bo_name = target_bo_name
         self.target_type = VM.getBOType(target_bo_name)
         self.target_lookup_field = target_lookup_field
         self.on_not_found_create = on_not_found_create
         self.generate_key = True if self.target_type.getBusinessKeyAttrName() else False
         self.target_lookup_func = target_lookup_func
+        self.kwargs = kwargs
 
     def _create_related_bo(self, context, lookup_value):
         """Creates a new related BO based on the on_not_found_create config."""
@@ -517,11 +540,14 @@ class RelationField(AbstractField):
             value = value_source.get_value(context)
             if value is None:
                 continue
+
             bo_field = new_bo.getBOField(field)
-            if bo_field.isObjectLink() or bo_field.isCollectionLink():
-                rel_bo = bo_field.linkObject(value)
+            if bo_field.isCollectionLink():
+                rel_bo = link_nm(new_bo, value, field)
                 if rel_bo:
                     context.add_touched_object(rel_bo)
+            elif bo_field.isObjectLink():
+                bo_field.setObject(value)
             else:
                 bo_field.setValue(value)
 
@@ -557,13 +583,20 @@ class RelationField(AbstractField):
         elif self.target_lookup_func:
             condition = self.target_lookup_func(context, lookup_value)
             related_bo = get_bo(tr, self.target_type, condition, strict=True)
+
             if not related_bo and self.on_not_found_create and lookup_value:
                 related_bo = self._create_related_bo(context, lookup_value)
 
-
-
         if related_bo:
-            target_field.linkObject(related_bo)
+            if target_field.isCollectionLink():
+                link_bo = link_nm(target_bo, related_bo, self.target_field)
+                if link_bo:
+                    for f, v  in self.kwargs.items():
+                        link_bo.getBOField(f).setValue(v)
+                    context.add_touched_object(link_bo)
+            elif target_field.isObjectLink():
+                target_field.setObject(related_bo)
+
             context.add_touched_object(related_bo)
         else:
             if lookup_value:
@@ -583,20 +616,29 @@ class ValueSource(object):
 
 class Static(ValueSource):
     """An instruction to use a static, predefined value."""
-    def __init__(self, value):
+    def __init__(self, value, processor_func=None):
         self.value = value
+        self.processor_func = processor_func
 
     def get_value(self, context):
-        return self.value
+        if self.processor_func:
+            return self.processor_func(context, self.value)
+        else:
+            return self.value
 
 class FromSource(ValueSource):
     """An instruction to get a value from a field on the source record."""
-    def __init__(self, source_field):
+    def __init__(self, source_field, processor_func=None):
         self.source_field = source_field
+        self.processor_func = processor_func
 
     def get_value(self, context):
         source_bo = context.get_source()
-        return source_bo.getBOField(self.source_field).getValue()
+        value = source_bo.getBOField(self.source_field).getValue()
+        if self.processor_func:
+            value = self.processor_func(context, value)
+
+        return value
 
 class FromAnywhere(ValueSource):
     """
@@ -604,11 +646,11 @@ class FromAnywhere(ValueSource):
     The signature of the function should be:
         `callable_func(context: ProcessingContext) -> Any`
     """
-    def __init__(self, callable_func):
-        self.callable_func = callable_func
+    def __init__(self, processor_func):
+        self.processor_func = processor_func
 
     def get_value(self, context):
-        return self.callable_func(context)
+        return self.processor_func(context, None)
 
 
 
@@ -635,14 +677,14 @@ class RelationshipProcessor(AbstractProcessor):
         rel_field = source_bo.getBOField(rel_attr_name)
         if rel_field.isCollectionLink():
             if target_bo:
-                rel_bo = rel_field.linkObject(target_bo)
+                rel_bo = link_nm(source_bo, target_bo, rel_attr_name)
                 if rel_bo:
                     self.add_touched_object(rel_bo)
         else:
             rel_field.setObject(target_bo)
-        
+
         return rel_bo
-    
+
     def pre_process(self): pass
 
     def post_process(self): pass
