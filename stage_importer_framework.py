@@ -600,7 +600,7 @@ class RelationField(AbstractField):
             context.add_touched_object(related_bo)
         else:
             if lookup_value:
-                log_("Could not find or create a related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_WARN, source_bo)
+                log_("Could not find or create a related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_DEBUG, source_bo)
 
 # ==============================================================================
 # 3.2 Helper Classes for RelationField processing
@@ -912,6 +912,10 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                 target_bo, created = self._get_or_create_target(tr, record)
                 if created:
                     log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, record)
+                else:
+                    if self._skip_update(target_bo):
+                        log_("Skipping update of '%s' for record '%s'." % (target_bo.getMoniker(), record.getMoniker()), VM.LOG_DEBUG, target_bo)
+                        continue
                 processor_instance = processor_class(tr, record, target_bo, created)
                 processor_instance.pre_process()
                 processor_instance.process()
@@ -921,7 +925,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
 
                 self._mark_as_processed(record, "PROCESSED", processor_instance.message)
                 self.processed_count += 1
-                #log_("Success: %s" % processor_instance.message, VM.LOG_INFO, record)
+
             except Exception as e:
                 self.failed_count += 1
                 error_message = str(e)
@@ -930,6 +934,12 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                 self._mark_as_processed(record, "FAILED", error_message)
                 log_("ERROR on record %s: %s" % (identifier, error_message), VM.LOG_ERROR, record)
                 raise
+
+    def _skip_update(self, target_bo):
+        if target_bo.getBOFields().contains("ifUpdate"):
+            return False if target_bo.getBOField("ifUpdate").getValue() else True
+        else:
+            return False
 
     def _mark_as_processed(self, rec, status, msg=""):
         pass
