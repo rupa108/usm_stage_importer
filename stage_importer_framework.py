@@ -154,6 +154,23 @@ class AbstractField(object):
         else:
             log_("Value for field '%s' on source BO '%s' is undefined. Skipping mapping."
                   % (self.source_field, context.source.getMoniker()), VM.LOG_FINER)
+    
+    @abstractmethod
+    def get_processed_value(self, context):
+        # type: (context: ProcessingContext) -> Any
+        """
+        Gets the processed value without setting it on the target.
+        This is useful for lookups where we need the transformed value
+        but don't have a target object yet.
+        
+        Arguments:
+            context (ProcessingContext): The context containing the source business object.
+        
+        Returns:
+            The processed value that would be set on the target field.
+        """
+        pass
+    
     @abstractmethod
     def map_value(self, context):
         # type: (context: ProcessingContext) -> None
@@ -490,14 +507,16 @@ class PlainField(AbstractField):
         """
         super(PlainField, self).__init__(source_field=source_field, processor_func=processor_func, match_key=match_key, **kwargs)
 
-    def map_value(self, context):
+    def get_processed_value(self, context):
         source_bo = context.get_source()
         source_value = source_bo.getBOField(self.source_field).getValue()
         if self.processor_func:
-            final_value = self.processor_func(context, source_value)
+            return self.processor_func(context, source_value)
         else:
-            final_value = source_value
-
+            return source_value
+    
+    def map_value(self, context):
+        final_value = self.get_processed_value(context)
         self.set_target_value(context, final_value)
 
 class StaticField(AbstractField):
@@ -508,12 +527,14 @@ class StaticField(AbstractField):
         super(StaticField, self).__init__(processor_func=processor_func, **kwargs)
         self.value = value
 
-    def map_value(self, context):
+    def get_processed_value(self, context):
         if self.processor_func:
-            final_value = self.processor_func(context, self.value)
+            return self.processor_func(context, self.value)
         else:
-            final_value = self.value
-
+            return self.value
+    
+    def map_value(self, context):
+        final_value = self.get_processed_value(context)
         self.set_target_value(context, final_value)
 
 class RelationField(AbstractField):
@@ -561,6 +582,20 @@ class RelationField(AbstractField):
                 bo_field.setValue(value)
 
         return new_bo
+    
+    def get_processed_value(self, context):
+        """
+        For RelationField, this returns the processed lookup value,
+        not the related object itself. This is useful for match_key lookups.
+        """
+        source_bo = context.get_source()
+        source_value = source_bo.getBOField(self.source_field).getValue()
+        if self.processor_func:
+            # For RelationField, processor_func might return an object or a value
+            # If it's used for match_key, it should return a simple value
+            return self.processor_func(context, source_value)
+        else:
+            return source_value
 
     def map_value(self, context):
         """Finds or creates a related BO and sets the relation on the target BO."""
@@ -886,11 +921,13 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         if field:
             self.source_key = field.source_field
             self.target_key = field.target_field
+            self.match_key_field = field  # Store the field object for later use
         else:
             assert source_key, "No match_key in processor class. source_key argument must be provided!"
             assert target_key, "No match_key in processor class. target_key argument must be provided!"
             self.source_key = source_key
             self.target_key = target_key
+            self.match_key_field = None
 
         self.generate_key = True if self.target_type.getBusinessKeyAttrName() else False
 
@@ -899,6 +936,35 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
 
     def get_target_bo(self, tr, row_bo):
         key_value = row_bo.getBOField(self.source_key).getValue()
+        
+        # Apply field processing if the match_key field has a processor_func
+        if self.match_key_field and self.match_key_field.processor_func:
+            # Create a minimal context for the field's get_processed_value method
+            class MinimalContext:
+                def __init__(self, transaction, source, source_field, target_field):
+                    self.transaction = transaction
+                    self.source = source
+                    self.source_field_name = source_field
+                    self.target_field_name = target_field
+                    self.is_create = False  # This is for lookup, not creation
+                    self.is_update = False
+                    
+                def get_source(self):
+                    return self.source
+                    
+                def get_target(self):
+                    return None  # No target yet during lookup
+                    
+                def get_transaction(self):
+                    return self.transaction
+                    
+                def add_touched_object(self, bo):
+                    pass  # Not needed during lookup
+            
+            context = MinimalContext(tr, row_bo, self.source_key, self.target_key)
+            # Use the field's get_processed_value method instead of calling processor_func directly
+            key_value = self.match_key_field.get_processed_value(context)
+        
         condition = "%s == '%s'" % (self.target_key, key_value)
         target_bo = get_bo(tr, self.target_type, condition, strict=True)
         return target_bo
