@@ -21,6 +21,7 @@ from de.usu.s3.api import ApiBObject
 import traceback
 
 
+__LOG_DOMAIN__ = "Importer"
 undefined = object()
 # ==============================================================================
 # 0. CUSTOM EXCEPTIONS
@@ -52,6 +53,10 @@ def yesterday():
     # TBD
     pass
 
+def set_log_domain(log_domain):
+    global __LOG_DOMAIN__
+    __LOG_DOMAIN__ = log_domain
+
 def log_(message, level, bo=None):
     # type: (message: str, level: int, bo: ApiBObject) -> None
     """
@@ -63,7 +68,7 @@ def log_(message, level, bo=None):
     if level in [VM.LOG_INFO, VM.LOG_WARN, VM.LOG_ERROR, VM.LOG_EXCEPTION]:
         print "%s: %s" % (level_map.get(level, "LOG"), message)
 
-    VM.persistentLogMessage("Importer", message, None, None, bo, level, False)
+    VM.persistentLogMessage(__LOG_DOMAIN__, message, None, None, bo, level, False)
 
 
 def get_bo(tr, bo_type, condition, trl_type=VM.TRL_CURRENT, strict=False):
@@ -454,7 +459,7 @@ class MappingProcessor(AbstractProcessor):
                 descriptor.map_value(context)
             except Exception as e:
                 log_("Could not map field '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
-                raise
+
 
     def pre_process(self): pass
 
@@ -510,6 +515,7 @@ class StaticField(AbstractField):
             final_value = self.value
 
         self.set_target_value(context, final_value)
+
 class RelationField(AbstractField):
     """
     A descriptor for mapping a value to a related Business Object.
@@ -530,9 +536,7 @@ class RelationField(AbstractField):
         source_bo = context.get_source()
         log_("Creating new related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_INFO, source_bo)
 
-        tr = context.get_transaction()
-        new_bo = self.target_type.createBO(tr, self.generate_key)
-
+        attribute_dict = {}
         for field, value_source in self.on_not_found_create.items():
             if not isinstance(value_source, ValueSource):
                 raise TypeError("Value for 'on_not_found_create' must be an instance of a ValueSource class (Static, FromSource, etc.)")
@@ -540,7 +544,12 @@ class RelationField(AbstractField):
             value = value_source.get_value(context)
             if value is None:
                 continue
+            attribute_dict[field] = value
 
+        tr = context.get_transaction()
+        new_bo = self.target_type.createBO(tr, self.generate_key)
+
+        for field, value in attribute_dict.items():
             bo_field = new_bo.getBOField(field)
             if bo_field.isCollectionLink():
                 rel_bo = link_nm(new_bo, value, field)
@@ -569,12 +578,13 @@ class RelationField(AbstractField):
         tr = context.get_transaction()
         related_bo = None
         lookup = None
-
+        rel_kwds = {}
         if self.processor_func:
             related_bo = self.processor_func(context, lookup_value)
             if related_bo is undefined:
                 log_("Processor function returned undefinded for '%s'. Skipping mapping." % self.source_field, VM.LOG_FINER, source_bo)
                 return
+
         elif self.target_lookup_field:
             condition = "%s == '%s'" % (self.target_lookup_field, lookup_value)
             related_bo = get_bo(tr, self.target_type, condition, strict=True)
@@ -589,10 +599,14 @@ class RelationField(AbstractField):
 
         if related_bo:
             if target_field.isCollectionLink():
-                link_bo = link_nm(target_bo, related_bo, self.target_field)
+                link_bo = link_nm(target_bo, related_bo, self.target_field, **rel_kwds)
                 if link_bo:
                     for f, v  in self.kwargs.items():
-                        link_bo.getBOField(f).setValue(v)
+                        if isinstance(v, ValueSource):
+                            val = v.get_value(context)
+                        else:
+                            val = v
+                        link_bo.getBOField(f).setValue(val)
                     context.add_touched_object(link_bo)
             elif target_field.isObjectLink():
                 target_field.setObject(related_bo)
@@ -933,7 +947,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                     error_message += " Conflicting processors: %s" % e.matching_processors
                 self._mark_as_processed(record, "FAILED", error_message)
                 log_("ERROR on record %s: %s" % (identifier, error_message), VM.LOG_ERROR, record)
-                raise
+
 
     def _skip_update(self, target_bo):
         if target_bo.getBOFields().contains("ifUpdate"):
