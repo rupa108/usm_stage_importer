@@ -154,7 +154,7 @@ class AbstractField(object):
         else:
             log_("Value for field '%s' on source BO '%s' is undefined. Skipping mapping."
                   % (self.source_field, context.source.getMoniker()), VM.LOG_FINER)
-    
+
     @abstractmethod
     def get_processed_value(self, context):
         # type: (context: ProcessingContext) -> Any
@@ -162,15 +162,15 @@ class AbstractField(object):
         Gets the processed value without setting it on the target.
         This is useful for lookups where we need the transformed value
         but don't have a target object yet.
-        
+
         Arguments:
             context (ProcessingContext): The context containing the source business object.
-        
+
         Returns:
             The processed value that would be set on the target field.
         """
         pass
-    
+
     @abstractmethod
     def map_value(self, context):
         # type: (context: ProcessingContext) -> None
@@ -514,7 +514,7 @@ class PlainField(AbstractField):
             return self.processor_func(context, source_value)
         else:
             return source_value
-    
+
     def map_value(self, context):
         final_value = self.get_processed_value(context)
         self.set_target_value(context, final_value)
@@ -532,7 +532,7 @@ class StaticField(AbstractField):
             return self.processor_func(context, self.value)
         else:
             return self.value
-    
+
     def map_value(self, context):
         final_value = self.get_processed_value(context)
         self.set_target_value(context, final_value)
@@ -582,7 +582,7 @@ class RelationField(AbstractField):
                 bo_field.setValue(value)
 
         return new_bo
-    
+
     def get_processed_value(self, context):
         """
         For RelationField, this returns the processed lookup value,
@@ -825,24 +825,30 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
             else:
                 self.processed_count += 1
 
-    def get_source_bo(self, tr, row_bo):
+    def get_source_condition(self, tr, row_bo):
         cls = type(self)
         source_condition = "%s == '%s'" % (
             cls.source_bo_key_attribute,
             row_bo.getBOField(cls.stage_bo_source_attribute).getValue()
         )
+        return source_condition
 
-        source_bo = get_bo(tr, self.source_bo_type, source_condition, strict=True)
-
-        return source_bo
-
-    def get_target_bo(self, tr, row_bo):
+    def get_target_condition(self, tr, row_bo):
         cls = type(self)
         target_condition = "%s == '%s'" % (
             cls.target_bo_key_attribute,
             row_bo.getBOField(cls.stage_bo_target_attribute).getValue()
         )
+        return target_condition
 
+    def get_source_bo(self, tr, row_bo):
+        source_condition = self.get_source_condition(tr, row_bo)
+        source_bo = get_bo(tr, self.source_bo_type, source_condition, strict=True)
+
+        return source_bo
+
+    def get_target_bo(self, tr, row_bo):
+        target_condition = self.get_target_condition(tr, row_bo)
         target_bo = get_bo(tr, self.target_bo_type, target_condition, strict=True)
 
         return target_bo
@@ -936,7 +942,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
 
     def get_target_bo(self, tr, row_bo):
         key_value = row_bo.getBOField(self.source_key).getValue()
-        
+
         # Apply field processing if the match_key field has a processor_func
         if self.match_key_field and self.match_key_field.processor_func:
             # Create a minimal context for the field's get_processed_value method
@@ -948,23 +954,23 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                     self.target_field_name = target_field
                     self.is_create = False  # This is for lookup, not creation
                     self.is_update = False
-                    
+
                 def get_source(self):
                     return self.source
-                    
+
                 def get_target(self):
                     return None  # No target yet during lookup
-                    
+
                 def get_transaction(self):
                     return self.transaction
-                    
+
                 def add_touched_object(self, bo):
                     pass  # Not needed during lookup
-            
+
             context = MinimalContext(tr, row_bo, self.source_key, self.target_key)
             # Use the field's get_processed_value method instead of calling processor_func directly
             key_value = self.match_key_field.get_processed_value(context)
-        
+
         condition = "%s == '%s'" % (self.target_key, key_value)
         target_bo = get_bo(tr, self.target_type, condition, strict=True)
         return target_bo
@@ -1124,6 +1130,7 @@ class ImportOrchestrator(object):
             log_(traceback.format_exc(), VM.LOG_EXCEPTION)
             raise
         log_("--- Import Orchestrator Finished ---", VM.LOG_INFO)
+
 
 ####################################################################################################
 # TEST
