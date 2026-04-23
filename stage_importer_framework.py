@@ -1,4 +1,8 @@
 """
+Version: a3d8652
+Source: https://github.com/rupa108/usm_stage_importer
+"""
+"""
 A library for building staging-to-production import scripts.
 
 This module provides a highly modular, enterprise-grade framework for creating
@@ -220,6 +224,9 @@ class ProcessorMetaclass(ABCMeta):
             del attrs[each.target_field]
 
         meta.fields = ordered_descriptors
+        target_bo_name = getattr(meta, "target_bo_name", None)
+        if target_bo_name:
+            meta.target_type = VM.getBOType(target_bo_name)
         attrs["meta"] = meta
 
         return super(ProcessorMetaclass, cls).__new__(cls, name, bases, attrs)
@@ -227,7 +234,6 @@ class ProcessorMetaclass(ABCMeta):
 
 class AbstractProcessor(object):
     """Base class for processing a single record and tracking touched objects."""
-    __metaclass__ = ProcessorMetaclass
 
     def __init__(self, tr, source_bo, target_bo):
         self.transaction = tr
@@ -288,10 +294,10 @@ class AbstractProcessor(object):
         if not bo:
             bo = get_bo(tr, bot, condition)
             if not bo:
-                name = create_attrs.pop("name", None)
-                bo = bot.create(**create_attrs)
-                if name:
-                    bo.getBOField("name").setValue(name)
+                generate_key = True if bot.getBusinessKeyAttrName() else False
+                bo = bot.createBO(tr, generate_key)
+                for att_name, value in create_attrs.items():
+                    bo.getBOField(att_name).setValue(value)
 
             setattr(cls, attr_name, bo)
 
@@ -333,12 +339,18 @@ class AbstractFactory(object):
     """
     __metaclass__ = ABCMeta
 
-    def __init__(self, source_repository, default_processor_class):
+    def __init__(self, source_repository, default_processor_class=None, rules=None):
         # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor) -> None
         assert isinstance(source_repository, AbstractRepository), "source_repository must be an instance of AbstractRepository"
-        assert issubclass(default_processor_class, AbstractProcessor), "default_processor_class must be a subclass of AbstractProcessor"
         self.repository = source_repository
+        assert default_processor_class or rules, "Either default_processor_class or rules must be given"
+        if default_processor_class:
+            assert issubclass(default_processor_class, AbstractProcessor), "default_processor_class must be a subclass of AbstractProcessor"
         self.default_processor_class = default_processor_class
+        self.rules = rules if rules else []
+        for func, cls in self.rules:
+            assert callable(func), "Matcher must be a callable function."
+            assert issubclass(cls, AbstractProcessor), "Processor class %s must be a subclass of AbstractProcessor" % cls.__name__
         self.processed_count = 0
         self.failed_count = 0
         self.active_target_keys = set()
@@ -458,6 +470,9 @@ class ProcessingContext(object):
 
 class MappingProcessor(AbstractProcessor):
     """Default implementation of a Processor"""
+    __metaclass__ = ProcessorMetaclass
+
+    _generate_key = None
 
     def __init__(self, tr, source_bo, target_bo, is_create=False):
         super(MappingProcessor, self).__init__(tr, source_bo, target_bo)
@@ -477,6 +492,14 @@ class MappingProcessor(AbstractProcessor):
             except Exception as e:
                 log_("Could not map field '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
 
+    @classmethod
+    def generate_key(cls):
+        if cls._generate_key is None:
+            target_type = getattr(cls.meta, "target_type", None)
+            if target_type:
+                return True if target_type.getBusinessKeyAttrName() else False
+        else:
+            cls._generate_key
 
     def pre_process(self): pass
 
@@ -604,7 +627,8 @@ class RelationField(AbstractField):
         target_bo = context.get_target()
         target_field = target_bo.getBOField(self.target_field)
 
-        if not lookup_value:
+        """Ignore empty lookup_value if lookup_func present"""
+        if not lookup_value and not self.target_lookup_func:
             if target_field.isObjectLink():
                 target_field.setObject(None)
 
@@ -760,10 +784,8 @@ class _RulesMixin(object):
 
         processor_class = matching_classes[0] if matching_classes else self.default_processor_class
 
-        if matching_classes:
-            log_("Selected processor '%s' for record." % processor_class.__name__, VM.LOG_DEBUG, staging_record)
-        else:
-            log_("No specific processor matched. Using default: '%s'." % processor_class.__name__, VM.LOG_DEBUG, staging_record)
+        if processor_class:
+            log_("Selected processor '%s' for record." % processor_class.__name__, VM.LOG_FINE, staging_record)
 
         return processor_class
 
@@ -796,9 +818,9 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
     stage_bo_target_attribute = None
     ###########################################
 
-    def __init__(self, source_repository, default_processor_class, rules=None):
+    def __init__(self, source_repository, default_processor_class=None, rules=None):
         # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor, rules: List[Tuple]) -> None
-        super(RelationProcessorFactoryBase, self).__init__(source_repository, default_processor_class)
+        super(RelationProcessorFactoryBase, self).__init__(source_repository, default_processor_class, rules)
         cls = type(self)
         self.source_bo_type = VM.getBOType(cls.source_bo_name)
         self.target_bo_type = VM.getBOType(cls.target_bo_name)
@@ -910,41 +932,45 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             The signature of the matcher function should be:
             `matcher(staging_record: Any) -> bool`
     """
-    def __init__(self, repository, default_processor_class, target_bo_name=None, source_key=None, target_key=None, rules=None):
+    def __init__(self, repository, default_processor_class=None, target_bo_name=None, source_key=None, target_key=None, rules=None):
         # type: (repository: AbstractRepository, default_processor_class: AbstractProcessor, target_bo_name: str, source_key: str, target_key: str, rules: List[Tuple]) -> None
-        super(MappingProcessorFactory, self).__init__(repository, default_processor_class)
-        self.rules = rules if rules else []
-        for func, cls in self.rules:
-            assert callable(func), "Matcher must be a callable function."
-            assert issubclass(cls, AbstractProcessor), "Processor class must be a subclass of AbstractProcessor"
-        self.target_bo_name = getattr(default_processor_class.meta, "target_bo_name", None)
-        if not self.target_bo_name:
-            assert target_bo_name, "No target_bo_name in processor class. target_bo_name argument must be provided!"
-            self.target_bo_name = target_bo_name
-        self.target_type = VM.getBOType(self.target_bo_name)
+        super(MappingProcessorFactory, self).__init__(repository, default_processor_class=default_processor_class, rules=rules)
+        self.generate_key = None
+        self.target_type = None
+        if default_processor_class:
+            self.target_type = getattr(default_processor_class.meta, "target_type", None)
 
-        field = default_processor_class.get_match_key() # type: AbstractField
-        if field:
-            self.source_key = field.source_field
-            self.target_key = field.target_field
-            self.match_key_field = field  # Store the field object for later use
-        else:
-            assert source_key, "No match_key in processor class. source_key argument must be provided!"
-            assert target_key, "No match_key in processor class. target_key argument must be provided!"
-            self.source_key = source_key
-            self.target_key = target_key
-            self.match_key_field = None
+        if not self.target_type and target_bo_name:
+            self.target_type = VM.getBOType(target_bo_name)
 
-        self.generate_key = True if self.target_type.getBusinessKeyAttrName() else False
+        self.source_key = source_key
+        self.target_key = target_key
+        self.match_key_field = None
+        processor_classes = [c for f, c in self.rules]
+        if default_processor_class:
+            processor_classes.append(default_processor_class)
+
+        for cls in processor_classes:
+            rules_target_bo_name = getattr(cls.meta, "target_bo_name", None)
+            assert rules_target_bo_name or self.target_bo_name, "No target_bo_name in default_processor_class. target_bo_name argument must be provided!"
+            field = cls.get_match_key()
+            if not field:
+                assert field.source_field or self.source_key, "No match_key in processor class %s. source_key argument must be provided!" % cls.__name__
+                assert field.target_field or self.target_key, "No match_key in processor class %s. target_key argument must be provided!"  % cls.__name__
 
     def get_source_bo(self, tr, row_bo):
         return row_bo
 
-    def get_target_bo(self, tr, row_bo):
-        key_value = row_bo.getBOField(self.source_key).getValue()
+    def get_target_bo(self, tr, row_bo, processor_class):
+        match_key_field = processor_class.get_match_key() or self.match_key_field
+        source_key = match_key_field.source_field if match_key_field else self.source_key
+        target_key = match_key_field.target_field if match_key_field else self.target_field
+        target_type = getattr(processor_class.meta, "target_type", None) or self.target_type
+
+        key_value = row_bo.getBOField(source_key).getValue()
 
         # Apply field processing if the match_key field has a processor_func
-        if self.match_key_field and self.match_key_field.processor_func:
+        if match_key_field and match_key_field.processor_func:
             # Create a minimal context for the field's get_processed_value method
             class MinimalContext:
                 def __init__(self, transaction, source, source_field, target_field):
@@ -967,19 +993,20 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                 def add_touched_object(self, bo):
                     pass  # Not needed during lookup
 
-            context = MinimalContext(tr, row_bo, self.source_key, self.target_key)
+            context = MinimalContext(tr, row_bo, source_key, target_key)
             # Use the field's get_processed_value method instead of calling processor_func directly
-            key_value = self.match_key_field.get_processed_value(context)
+            key_value = match_key_field.get_processed_value(context)
 
-        condition = "%s == '%s'" % (self.target_key, key_value)
-        target_bo = get_bo(tr, self.target_type, condition, strict=True)
+        condition = "%s == '%s'" % (target_key, key_value)
+        target_bo = get_bo(tr, target_type, condition, strict=True)
+
         return target_bo
 
-    def _get_or_create_target(self, tr, staging_record):
-        target_bo = self.get_target_bo(tr, staging_record)
-
+    def _get_or_create_target(self, tr, staging_record, processor_class):
+        target_bo = self.get_target_bo(tr, staging_record, processor_class)
         if not target_bo:
-            target_bo = self.target_type.createBO(tr, self.generate_key)
+            generate_key = self.generate_key if self.generate_key is not None else processor_class.generate_key()
+            target_bo = self.target_type.createBO(tr, generate_key)
             created = True
         else:
             created = False
@@ -992,10 +1019,9 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             iterator.commitedAfter(commit_batch_size)
 
         for record in iterator:
-            identifier = record.getBOField(self.source_key).getValue()
             try:
                 processor_class = self._get_processor_class(tr, record)
-                target_bo, created = self._get_or_create_target(tr, record)
+                target_bo, created = self._get_or_create_target(tr, record, processor_class)
                 if created:
                     log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, record)
                 else:
@@ -1018,8 +1044,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                 if isinstance(e, AmbiguousProcessorError):
                     error_message += " Conflicting processors: %s" % e.matching_processors
                 self._mark_as_processed(record, "FAILED", error_message)
-                log_("ERROR on record %s: %s" % (identifier, error_message), VM.LOG_ERROR, record)
-
+                log_("ERROR on record %s: %s" % (record.getMoniker(), error_message), VM.LOG_ERROR, record)
 
     def _skip_update(self, target_bo):
         if target_bo.getBOFields().contains("ifUpdate"):
