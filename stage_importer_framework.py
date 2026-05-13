@@ -23,6 +23,7 @@ import traceback
 
 __LOG_DOMAIN__ = "Importer"
 undefined = object()
+CLEAR_LINK = object()
 # ==============================================================================
 # 0. CUSTOM EXCEPTIONS
 # ==============================================================================
@@ -43,6 +44,11 @@ class MultipleRecordsFoundError(Exception):
     """
     def __init__(self, message):
         super(MultipleRecordsFoundError, self).__init__(message)
+        self.message = message
+
+class ValidationError(Exception):
+    def __init__(self, message):
+        super(ValidationError, self).__init__(message)
         self.message = message
 
 # ==============================================================================
@@ -143,11 +149,12 @@ class AbstractField(object):
     def set_target_field(self, name):
         self.target_field = name
 
-    def set_target_value(self, context, value):
+    def set_target_value(self, context):
         """
         Sets the target field value directly.
         This is used for static values or when the processor function is not needed.
         """
+        value = context.get_value(self)
         if not value is undefined:
             target_bo = context.get_target()
             target_bo.getBOField(self.target_field).setValue(value)
@@ -231,7 +238,7 @@ class ProcessorMetaclass(ABCMeta):
 class AbstractProcessor(object):
     """Base class for processing a single record and tracking touched objects."""
 
-    def __init__(self, tr, source_bo, target_bo):
+    def __init__(self, tr, source_bo, target_bo, **kwargs):
         self.transaction = tr
         self.source = source_bo
         self.target = target_bo
@@ -437,32 +444,43 @@ class AbstractReconciliationBaseline(object):
 class ProcessingContext(object):
     """Provides a controlled context to a custom processor function."""
     def __init__(self, processor, source_field_name, target_field_name):
-        self._processor = processor
+        self.processor = processor
         self.source_field_name = source_field_name
         self.target_field_name = target_field_name
+        self._value_store = {}
+
+    def store_value(self, field, value):
+        # type: (field: AbstractField, value: Any) -> None
+        field_name = field.target_field
+        self._value_store[field_name] = value
+
+    def get_value(self, field):
+        # type: (field: AbstractField) -> Any
+        field_name = field.target_field
+        return self._value_store.get(field_name, undefined)
 
     def get_source(self):
-        return self._processor.source
+        return self.processor.source
     source = property(get_source)
 
     def get_target(self):
-        return self._processor.target
+        return self.processor.target
     target = property(get_target)
 
     def add_touched_object(self, bo):
-        self._processor.add_touched_object(bo)
+        self.processor.add_touched_object(bo)
 
     def get_transaction(self):
-        return self._processor.transaction
+        return self.processor.transaction
     transaction = property(get_transaction)
 
     @property
     def is_create(self):
-        return self._processor.is_create
+        return self.processor.is_create
 
     @property
     def is_update(self):
-        return self._processor.is_update
+        return self.processor.is_update
 
 class MappingProcessor(AbstractProcessor):
     """Default implementation of a Processor"""
@@ -481,12 +499,25 @@ class MappingProcessor(AbstractProcessor):
         if not hasattr(self, '__processing_order__'):
             log_("`__processing_order__` not defined for %s. Field processing order is not guaranteed." % self.__class__.__name__, VM.LOG_FINER, self.source)
 
+        queue = []
         for descriptor in self.meta.fields:
             try:
                 context = ProcessingContext(self, descriptor.source_field, descriptor.target_field)
                 descriptor.map_value(context)
+            except ValidationError as e:
+                raise
             except Exception as e:
                 log_("Could not map field '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
+            else:
+                queue.append((descriptor, context))
+
+        for descriptor, context in queue:
+            try:
+                descriptor.set_target_value(context)
+            except Exception as e:
+                log_("Could not save value form '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
+
+
 
     @classmethod
     def generate_key(cls):
@@ -536,7 +567,7 @@ class PlainField(AbstractField):
 
     def map_value(self, context):
         final_value = self.get_processed_value(context)
-        self.set_target_value(context, final_value)
+        context.store_value(self, final_value)
 
 class StaticField(AbstractField):
     """A descriptor for setting a static, predefined value on a target field."""
@@ -554,7 +585,8 @@ class StaticField(AbstractField):
 
     def map_value(self, context):
         final_value = self.get_processed_value(context)
-        self.set_target_value(context, final_value)
+        context.store_value(self, final_value)
+
 
 class RelationField(AbstractField):
     """
@@ -617,59 +649,135 @@ class RelationField(AbstractField):
             return source_value
 
     def map_value(self, context):
-        """Finds or creates a related BO and sets the relation on the target BO."""
+        """Resolve the related BO for this mapping and store it on the context.
+
+        Reads the lookup value from the source BO and determines the related
+        target BO using one of the configured resolution strategies (in order
+        of precedence):
+
+        1. ``processor_func`` — custom callable that returns the related BO,
+           ``undefined`` to skip the mapping, or a falsy value if no result.
+        2. ``target_lookup_field`` — build a simple equality condition against
+           the configured field and query for the related BO.
+        3. ``target_lookup_func`` — custom callable that builds the query
+           condition dynamically.
+
+        If no BO is found via strategies 2 or 3 and ``on_not_found_create`` is
+        enabled, a new related BO is created via ``_create_related_bo``.
+
+        The value stored on the context is one of:
+
+        * ``CLEAR_LINK`` — the source lookup value is empty and no
+          ``target_lookup_func`` is configured; the target ObjectLink should
+          be cleared.
+        * A related BO instance — resolved successfully; should be applied to
+          the target field.
+        * ``undefined`` — nothing actionable (processor skipped, lookup
+          failed, or no strategy applied); the target field should be left
+          untouched.
+
+        A DEBUG message is logged when a lookup strategy fails to find or
+        create a related BO despite a non-empty lookup value.
+
+        Note:
+            This method only resolves and stores the related BO. Applying it
+            to the target field is the responsibility of
+            :meth:`set_target_value`.
+
+        Args:
+            context: The mapping context providing access to the source BO,
+                target BO, transaction, and value storage.
+        """
         source_bo = context.get_source()
         lookup_value = source_bo.getBOField(self.source_field).getValue()
+
+        result = undefined
+
+        if not lookup_value and not self.target_lookup_func:
+            result = CLEAR_LINK
+        elif self.processor_func:
+            result = self.processor_func(context, lookup_value)
+        else:
+            tr = context.get_transaction()
+            if self.target_lookup_field:
+                condition = "%s == '%s'" % (self.target_lookup_field, lookup_value)
+            elif self.target_lookup_func:
+                condition = self.target_lookup_func(context, lookup_value)
+            else:
+                condition = None
+
+            if condition is not None:
+                related_bo = get_bo(tr, self.target_type, condition, strict=True)
+                if not related_bo and self.on_not_found_create and lookup_value:
+                    related_bo = self._create_related_bo(context, lookup_value)
+
+                if related_bo:
+                    result = related_bo
+                elif lookup_value:
+                    log_("Could not find or create a related object for '%s' in BO '%s'"
+                         % (lookup_value, self.target_bo_name), VM.LOG_DEBUG, source_bo)
+                    # result stays undefined
+
+        context.store_value(self, result)
+
+
+    def set_target_value(self, context):
+        """Apply the previously resolved related BO to the target field.
+
+        Consumes the value stored on the context by :meth:`map_value` and
+        updates the target BO accordingly:
+
+        * ``undefined`` — the mapping is skipped (a FINER log entry is
+          emitted) and the target field is left untouched.
+        * ``CLEAR_LINK`` — if the target field is an ObjectLink, it is
+          cleared via ``setObject(None)``.
+        * A related BO — applied to the target field based on its type:
+
+            - **CollectionLink**: a link BO is created via ``link_nm``, any
+              configured ``kwargs`` (including ``ValueSource`` values
+              resolved against the context) are written to it, and the link
+              BO is registered as touched on the context.
+            - **ObjectLink**: the related BO is assigned via
+              ``setObject(related_bo)``.
+
+          The related BO itself is also registered as touched on the
+          context.
+
+        Note:
+            :meth:`map_value` must have been called on the same context
+            beforehand to populate the stored value.
+
+        Args:
+            context: The mapping context providing access to the target BO
+                and the previously stored related BO.
+        """
+        related_bo = context.get_value(self)
+
+        if related_bo is undefined:
+            log_("Processor function returned undefined for '%s'. Skipping mapping."
+                 % self.source_field, VM.LOG_FINER, context.get_source())
+            return
+
         target_bo = context.get_target()
         target_field = target_bo.getBOField(self.target_field)
 
-        """Ignore empty lookup_value if lookup_func present"""
-        if not lookup_value and not self.target_lookup_func:
+        if related_bo is CLEAR_LINK:
             if target_field.isObjectLink():
                 target_field.setObject(None)
-
             return
 
-        tr = context.get_transaction()
-        related_bo = None
-        lookup = None
-        rel_kwds = {}
-        if self.processor_func:
-            related_bo = self.processor_func(context, lookup_value)
-            if related_bo is undefined:
-                log_("Processor function returned undefinded for '%s'. Skipping mapping." % self.source_field, VM.LOG_FINER, source_bo)
-                return
+        if target_field.isCollectionLink():
+            link_bo = link_nm(target_bo, related_bo, self.target_field)
+            if link_bo:
+                for f, v in self.kwargs.items():
+                    val = v.get_value(context) if isinstance(v, ValueSource) else v
+                    link_bo.getBOField(f).setValue(val)
+                context.add_touched_object(link_bo)
+        elif target_field.isObjectLink():
+            target_field.setObject(related_bo)
 
-        elif self.target_lookup_field:
-            condition = "%s == '%s'" % (self.target_lookup_field, lookup_value)
-            related_bo = get_bo(tr, self.target_type, condition, strict=True)
-            if not related_bo and self.on_not_found_create and lookup_value:
-                related_bo = self._create_related_bo(context, lookup_value)
-        elif self.target_lookup_func:
-            condition = self.target_lookup_func(context, lookup_value)
-            related_bo = get_bo(tr, self.target_type, condition, strict=True)
+        context.add_touched_object(related_bo)
 
-            if not related_bo and self.on_not_found_create and lookup_value:
-                related_bo = self._create_related_bo(context, lookup_value)
-
-        if related_bo:
-            if target_field.isCollectionLink():
-                link_bo = link_nm(target_bo, related_bo, self.target_field, **rel_kwds)
-                if link_bo:
-                    for f, v  in self.kwargs.items():
-                        if isinstance(v, ValueSource):
-                            val = v.get_value(context)
-                        else:
-                            val = v
-                        link_bo.getBOField(f).setValue(val)
-                    context.add_touched_object(link_bo)
-            elif target_field.isObjectLink():
-                target_field.setObject(related_bo)
-
-            context.add_touched_object(related_bo)
-        else:
-            if lookup_value:
-                log_("Could not find or create a related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_DEBUG, source_bo)
 
 # ==============================================================================
 # 3.2 Helper Classes for RelationField processing
@@ -834,8 +942,19 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
         log_("--- Starting Relationship Import Phase ---", VM.LOG_INFO)
 
         for row_bo in self.repository.get_unprocessed_records(tr):
+
             try:
                 self._process_row(tr, row_bo)
+            except Exception as e:
+                self.failed_count += 1
+                if isinstance(e, AmbiguousProcessorError):
+                    error_message = "%s: %s" % (type(e).__name__, e.message)
+                    error_message += " Conflicting processors: %s" % e.matching_processors
+                elif isinstance(e, ValidationError):
+                    error_message = "%s: %s" % (type(e).__name__, e.message)
+                else:
+                    error_message = str(e)
+                log_(error_message, VM.LOG_ERROR, row_bo)
             except:
                 log_("Failed to process %s" % row_bo.getMoniker(), VM.LOG_ERROR, row_bo)
                 log_(traceback.format_exc(), VM.LOG_EXCEPTION, row_bo)
@@ -881,7 +1000,7 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
             log_("Source or target BO not found for row: %s" % row_bo.getMoniker(), VM.LOG_WARN, row_bo)
             return
         ProcessorClass = self._get_processor_class(tr, row_bo)
-        processor = ProcessorClass(tr, source_bo, target_bo)
+        processor = ProcessorClass(tr, source_bo, target_bo, row_bo=row_bo)
         processor.pre_process()
         processor.process()
         processor.post_process()
@@ -1002,7 +1121,8 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         target_bo = self.get_target_bo(tr, staging_record, processor_class)
         if not target_bo:
             generate_key = self.generate_key if self.generate_key is not None else processor_class.generate_key()
-            target_bo = self.target_type.createBO(tr, generate_key)
+            target_type = getattr(processor_class.meta, "target_type", None) or self.target_type
+            target_bo = target_type.createBO(tr, generate_key)
             created = True
         else:
             created = False
@@ -1015,6 +1135,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             iterator.commitedAfter(commit_batch_size)
 
         for record in iterator:
+            created = None
             try:
                 processor_class = self._get_processor_class(tr, record)
                 target_bo, created = self._get_or_create_target(tr, record, processor_class)
@@ -1033,14 +1154,21 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
 
                 self._mark_as_processed(record, "PROCESSED", processor_instance.message)
                 self.processed_count += 1
-
             except Exception as e:
                 self.failed_count += 1
-                error_message = str(e)
                 if isinstance(e, AmbiguousProcessorError):
+                    error_message = "%s: %s" % (type(e).__name__, e.message)
                     error_message += " Conflicting processors: %s" % e.matching_processors
+                elif isinstance(e, ValidationError):
+                    error_message = "%s: %s" % (type(e).__name__, e.message)
+                    if created:
+                        target_bo.remove()
+                else:
+                    error_message = None
+                    log_(traceback.format_exc(), VM.LOG_EXCEPTION, record)
                 self._mark_as_processed(record, "FAILED", error_message)
-                log_("ERROR on record %s: %s" % (record.getMoniker(), error_message), VM.LOG_ERROR, record)
+                if error_message:
+                    log_(error_message, VM.LOG_ERROR, record)
 
     def _skip_update(self, target_bo):
         if target_bo.getBOFields().contains("ifUpdate"):
