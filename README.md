@@ -34,24 +34,26 @@ class SystemProcessor(MappingProcessor):
     """A simple processor for mapping staging data to the System BOType."""
     __processing_order__ = ('systemname', 'name', 'description', 'status')
     
+    xSourcePk = PlainField(source_field="PK", match_key=True)
+
     systemname = PlainField(source_field="CI_NR")
     name = PlainField(source_field="NAME")
     description = PlainField(source_field="DESCRIPTION")
     status = StaticField(value="ACTIVE")
+    
+    class Meta:
+        target_bo_name = "System"
+
 
 # 2. Configure and Run the Orchestrator
 def main()
     factory = MappingProcessorFactory(
         repository=StagingRepository("StagingSystem"),
         processor_class=SystemProcessor,
-        target_bo_name="System",
-        key_field="PK",
-        target_key_field="xSourcePk"
     )
 
     baseline = ReconciliationBaseline(
         botype_name="System",
-        key_field="xSourcePk",
         condition="status == 'ACTIVE'"
     )
 
