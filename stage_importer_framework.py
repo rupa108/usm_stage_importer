@@ -344,19 +344,59 @@ class AbstractFactory(object):
 
     def __init__(self, source_repository, default_processor_class=None, rules=None):
         # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor) -> None
-        assert isinstance(source_repository, AbstractRepository), "source_repository must be an instance of AbstractRepository"
+        self._check_constructor_args(source_repository=source_repository, default_processor_class=default_processor_class, rules=rules)
         self.repository = source_repository
-        assert default_processor_class or rules, "Either default_processor_class or rules must be given"
-        if default_processor_class:
-            assert issubclass(default_processor_class, AbstractProcessor), "default_processor_class must be a subclass of AbstractProcessor"
+        self.is_chained = False
         self.default_processor_class = default_processor_class
         self.rules = rules if rules else []
-        for func, cls in self.rules:
-            assert callable(func), "Matcher must be a callable function."
-            assert issubclass(cls, AbstractProcessor), "Processor class %s must be a subclass of AbstractProcessor" % cls.__name__
         self.processed_count = 0
         self.failed_count = 0
         self.active_target_keys = set()
+
+    @classmethod
+    def as_chained(cls, default_processor_class=None, rules=None):
+        """
+        Alternative constructor!
+        This is used when you need a full blown MappingProcessor for ChainedRelationField().
+        The main difference here is that the factory is not fed by its own StageRepository. In
+        fact this nested factory has no own repository but gets fed the records from the superior
+        repository.
+
+        Subclasses that need additional state initialized for chained processing should
+        override :meth:`_init_chained` (which is called by this constructor) rather than
+        re-implementing ``as_chained``.
+        """
+        cls._check_constructor_args(default_processor_class=default_processor_class, rules=rules)
+        inst = cls.__new__(cls)
+        inst.repository = None
+        inst.is_chained = True
+        inst.default_processor_class = default_processor_class
+        inst.rules = rules if rules else []
+        inst.processed_count = 0
+        inst.failed_count = 0
+        inst.active_target_keys = set()
+        inst._init_chained()
+        return inst
+
+    def _init_chained(self):
+        """
+        Hook for subclasses to initialize any additional state required for chained
+        processing. The base implementation does nothing.
+        """
+        pass
+
+    @staticmethod
+    def _check_constructor_args(source_repository=None, default_processor_class=None, rules=None):
+        if source_repository:
+            assert isinstance(source_repository, AbstractRepository), "source_repository must be an instance of AbstractRepository"
+        assert default_processor_class or rules, "Either default_processor_class or rules must be given"
+        if default_processor_class:
+            assert issubclass(default_processor_class, AbstractProcessor), "default_processor_class must be a subclass of AbstractProcessor"
+
+        if rules:
+            for func, cls in rules:
+                assert callable(func), "Matcher must be a callable function."
+                assert issubclass(cls, AbstractProcessor), "Processor class %s must be a subclass of AbstractProcessor" % cls.__name__
 
     @abstractmethod
     def process_all(self, tr, commit_batch_size=None):
@@ -634,19 +674,9 @@ class RelationField(AbstractField):
 
         return new_bo
 
-    def get_processed_value(self, context):
-        """
-        For RelationField, this returns the processed lookup value,
-        not the related object itself. This is useful for match_key lookups.
-        """
+    def get_lookup_value(self, context):
         source_bo = context.get_source()
-        source_value = source_bo.getBOField(self.source_field).getValue()
-        if self.processor_func:
-            # For RelationField, processor_func might return an object or a value
-            # If it's used for match_key, it should return a simple value
-            return self.processor_func(context, source_value)
-        else:
-            return source_value
+        return source_bo.getBOField(self.source_field).getValue()
 
     def map_value(self, context):
         """Resolve the related BO for this mapping and store it on the context.
@@ -688,8 +718,8 @@ class RelationField(AbstractField):
             context: The mapping context providing access to the source BO,
                 target BO, transaction, and value storage.
         """
-        source_bo = context.get_source()
-        lookup_value = source_bo.getBOField(self.source_field).getValue()
+
+        lookup_value = self.get_lookup_value(context)
 
         result = undefined
 
@@ -715,7 +745,7 @@ class RelationField(AbstractField):
                     result = related_bo
                 elif lookup_value:
                     log_("Could not find or create a related object for '%s' in BO '%s'"
-                         % (lookup_value, self.target_bo_name), VM.LOG_DEBUG, source_bo)
+                         % (lookup_value, self.target_bo_name), VM.LOG_DEBUG, context.source)
                     # result stays undefined
 
         context.store_value(self, result)
@@ -762,11 +792,11 @@ class RelationField(AbstractField):
         target_field = target_bo.getBOField(self.target_field)
 
         if related_bo is CLEAR_LINK:
-            if target_field.isObjectLink():
+            if target_field.isObjectLink() and not target_field.isCollectionLink():
                 target_field.setObject(None)
             return
 
-        if target_field.isCollectionLink():
+        if target_field.isCollectionLink() and target_bo and related_bo:
             link_bo = link_nm(target_bo, related_bo, self.target_field)
             if link_bo:
                 for f, v in self.kwargs.items():
@@ -778,6 +808,52 @@ class RelationField(AbstractField):
 
         context.add_touched_object(related_bo)
 
+class ChainedRelationField(RelationField):
+    """
+    A specialized RelationField that uses an internal factory to resolve the related BO.
+    This is useful for handling more complex relationships that require multiple fields
+    or custom logic to resolve.
+    """
+    def __init__(self, source_field, processor_or_factory, processor_func=None, **kwargs):
+        if isinstance(processor_or_factory, AbstractFactory):
+            self.factory = processor_or_factory
+            assert self.factory.is_chained, \
+                "The factory passed to ChainedRelationField must be built via as_chained()."
+        elif isinstance(processor_or_factory, type) and issubclass(processor_or_factory, AbstractProcessor):
+            self.factory = MappingProcessorFactory.as_chained(default_processor_class=processor_or_factory)
+        else:
+            raise TypeError(
+                "processor_or_factory must be a chained AbstractFactory or an "
+                "AbstractProcessor subclass, got %r" % (processor_or_factory,))
+
+        # The target BO type is dictated by the chained factory's processor mapping.
+        target_type = self.factory.target_type
+        assert target_type is not None, \
+            "Could not determine the target BO type for the chained factory."
+        target_bo_name = target_type.getName()
+
+        super(ChainedRelationField, self).__init__(
+            source_field, target_bo_name, processor_func=processor_func, **kwargs)
+
+    def map_value(self, context):
+        lookup_value = self.get_lookup_value(context)
+
+        result = None
+
+        if not lookup_value:
+            # Mirror RelationField semantics: an empty lookup clears the link.
+            result = CLEAR_LINK
+        elif self.processor_func:
+            # A processor_func is given the chance to short-circuit resolution.
+            # It may return a BO, CLEAR_LINK, or undefined to skip; only when it
+            # explicitly returns undefined do we fall through to the chained factory.
+            result = self.processor_func(context, lookup_value)
+
+        if result is None:
+            result = self.factory.process_chained(context)
+
+        context.store_value(self, result)
+ 
 
 # ==============================================================================
 # 3.2 Helper Classes for RelationField processing
@@ -1050,10 +1126,18 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
     def __init__(self, repository, default_processor_class=None, target_bo_name=None, source_key=None, target_key=None, rules=None):
         # type: (repository: AbstractRepository, default_processor_class: AbstractProcessor, target_bo_name: str, source_key: str, target_key: str, rules: List[Tuple]) -> None
         super(MappingProcessorFactory, self).__init__(repository, default_processor_class=default_processor_class, rules=rules)
+        self._setup_mapping(target_bo_name=target_bo_name, source_key=source_key, target_key=target_key)
+
+    def _init_chained(self):
+        # When built via as_chained() the regular __init__ (and therefore _setup_mapping)
+        # has not run, so the mapping-specific attributes must be initialized here.
+        self._setup_mapping()
+
+    def _setup_mapping(self, target_bo_name=None, source_key=None, target_key=None):
         self.generate_key = None
         self.target_type = None
-        if default_processor_class:
-            self.target_type = getattr(default_processor_class.meta, "target_type", None)
+        if self.default_processor_class:
+            self.target_type = getattr(self.default_processor_class.meta, "target_type", None)
 
         if not self.target_type and target_bo_name:
             self.target_type = VM.getBOType(target_bo_name)
@@ -1062,16 +1146,19 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         self.target_key = target_key
         self.match_key_field = None
         processor_classes = [c for f, c in self.rules]
-        if default_processor_class:
-            processor_classes.append(default_processor_class)
+        if self.default_processor_class:
+            processor_classes.append(self.default_processor_class)
 
         for cls in processor_classes:
-            rules_target_bo_name = getattr(cls.meta, "target_bo_name", None)
-            assert rules_target_bo_name or self.target_bo_name, "No target_bo_name in default_processor_class. target_bo_name argument must be provided!"
+            rules_target_type = getattr(cls.meta, "target_type", None)
+            assert rules_target_type or self.target_type, \
+                "No target_bo_name on processor class %s. target_bo_name argument must be provided!" % cls.__name__
             field = cls.get_match_key()
             if not field:
-                assert field.source_field or self.source_key, "No match_key in processor class %s. source_key argument must be provided!" % cls.__name__
-                assert field.target_field or self.target_key, "No match_key in processor class %s. target_key argument must be provided!"  % cls.__name__
+                assert self.source_key, \
+                    "No match_key in processor class %s. source_key argument must be provided!" % cls.__name__
+                assert self.target_key, \
+                    "No match_key in processor class %s. target_key argument must be provided!" % cls.__name__
 
     def get_source_bo(self, tr, row_bo):
         return row_bo
@@ -1079,7 +1166,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
     def get_target_bo(self, tr, row_bo, processor_class):
         match_key_field = processor_class.get_match_key() or self.match_key_field
         source_key = match_key_field.source_field if match_key_field else self.source_key
-        target_key = match_key_field.target_field if match_key_field else self.target_field
+        target_key = match_key_field.target_field if match_key_field else self.target_key
         target_type = getattr(processor_class.meta, "target_type", None) or self.target_type
 
         key_value = row_bo.getBOField(source_key).getValue()
@@ -1135,17 +1222,18 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             iterator.commitedAfter(commit_batch_size)
 
         for record in iterator:
+            source_record = self.get_source_bo(tr, record)
             created = None
             try:
-                processor_class = self._get_processor_class(tr, record)
-                target_bo, created = self._get_or_create_target(tr, record, processor_class)
+                processor_class = self._get_processor_class(tr, source_record)
+                target_bo, created = self._get_or_create_target(tr, source_record, processor_class)
                 if created:
                     log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, record)
                 else:
                     if self._skip_update(target_bo):
                         log_("Skipping update of '%s' for record '%s'." % (target_bo.getMoniker(), record.getMoniker()), VM.LOG_DEBUG, target_bo)
                         continue
-                processor_instance = processor_class(tr, record, target_bo, created)
+                processor_instance = processor_class(tr, source_record, target_bo, created)
                 processor_instance.pre_process()
                 processor_instance.process()
                 processor_instance.post_process()
@@ -1169,6 +1257,51 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                 self._mark_as_processed(record, "FAILED", error_message)
                 if error_message:
                     log_(error_message, VM.LOG_ERROR, record)
+
+    def process_chained(self, context):
+        # type: (context: ProcessingContext) -> ApiBObject
+        """
+        Resolve (find-or-create) and map a single related target BO for a chained
+        relationship, driven by the parent's source record.
+
+        Unlike :meth:`process_all`, this does not iterate a repository. It uses the
+        source BO provided by ``context`` (the parent processor's source record) as
+        the staging record, selects the appropriate processor class, finds or creates
+        the related target BO, runs the full processor lifecycle on it, and returns
+        the resolved target BO.
+
+        Any objects touched while mapping the related BO are registered on the parent
+        ``context`` so that reconciliation correctly treats them as active.
+
+        Returns:
+            The resolved related target BO, or ``undefined`` if the record could not
+            be processed.
+        """
+        assert self.is_chained, "process_chained() may only be called on a factory built via as_chained()."
+
+        tr = context.get_transaction()
+        source_record = context.get_source()
+
+        processor_class = self._get_processor_class(tr, source_record)
+        if not processor_class:
+            log_("No processor class matched for chained relation on '%s'."
+                 % source_record.getMoniker(), VM.LOG_WARN, source_record)
+            return undefined
+
+        target_bo, created = self._get_or_create_target(tr, source_record, processor_class)
+
+        processor_instance = processor_class(tr, source_record, target_bo, created)
+        processor_instance.pre_process()
+        processor_instance.process()
+        processor_instance.post_process()
+
+        # Propagate touched objects up to the parent context so the related BO (and
+        # anything it touched) is counted as active during reconciliation.
+        for moniker in processor_instance.get_active_keys():
+            self.active_target_keys.add(moniker)
+        context.add_touched_object(target_bo)
+
+        return target_bo
 
     def _skip_update(self, target_bo):
         if target_bo.getBOFields().contains("ifUpdate"):
