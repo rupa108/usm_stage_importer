@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 A library for building staging-to-production import scripts.
 
@@ -17,7 +18,9 @@ structure. It is built on several core principles:
   records that are no longer present in the source data.
 """
 from abc import ABCMeta, abstractmethod, abstractproperty
-from de.usu.s3.api import ApiBObject
+import copy
+from de.usu.s3.api import ApiBObject, ApiTransaction, ApiBOType
+from typing import Any, List, Tuple, Callable
 import traceback
 
 
@@ -64,7 +67,7 @@ def set_log_domain(log_domain):
     __LOG_DOMAIN__ = log_domain
 
 def log_(message, level, bo=None):
-    # type: (message: str, level: int, bo: ApiBObject) -> None
+    # type: (str, int, ApiBObject) -> None
     """
     A centralized logging function that prints to the console for high-level
     messages and writes to the persistent log for all levels.
@@ -78,7 +81,7 @@ def log_(message, level, bo=None):
 
 
 def get_bo(tr, bo_type, condition, trl_type=VM.TRL_CURRENT, strict=False):
-    # type: (tr: ApiTransaction, bo_type: ApiBOType, condition: str, trl_type: int, strict: bool) -> ApiBObject
+    # type: (ApiTransaction, ApiBOType, str, int, bool) -> ApiBObject
     """
     Finds a business object by type and condition, returning the first match.
     If strict is True, raises an exception if more than one object matches.
@@ -100,7 +103,7 @@ def get_bo(tr, bo_type, condition, trl_type=VM.TRL_CURRENT, strict=False):
     return result
 
 def link_nm(source, target, rel_name, **kwargs):
-    # type: (source: ApiBObject, target: ApiBObject, rel_name: str) -> ApiBObject
+    # type: (ApiBObject, ApiBObject, str, **Any) -> ApiBObject
     """We had strage issues with the ApiGOField.linkObject() method in some cases.
     This is a helper method that reliably creates links between two business objects.
     Creates a link between two business objects in a collection relationship.
@@ -130,9 +133,10 @@ class AbstractField(object):
     Abstract base class for a declarative mapping field.
    """
     __metaclass__ = ABCMeta
+    _creation_counter = 0
 
     def __init__(self, source_field=None, processor_func=None, match_key=False):
-        # type: (source_field: str, processor_func: callable) -> None
+        # type: (str, callable, bool) -> None
         """
         Initializes the field descriptor.
         Arguments:
@@ -140,11 +144,14 @@ class AbstractField(object):
             processor_func (callable): An optional function that processes the value
                 before setting it on the target business object. The signature should be:
                 `processor_func(context: ProcessingContext, source_value: Any) -> Any`
+            match_key (bool): Whether this field is a match key for identifying existing target records.
         """
         self.source_field = source_field
         self.target_field = None
         self.processor_func = processor_func
         self.match_key = match_key
+        self._creation_counter = AbstractField._creation_counter
+        AbstractField._creation_counter += 1
 
     def set_target_field(self, name):
         self.target_field = name
@@ -164,7 +171,7 @@ class AbstractField(object):
 
     @abstractmethod
     def get_processed_value(self, context):
-        # type: (context: ProcessingContext) -> Any
+        # type: (ProcessingContext) -> Any
         """
         Gets the processed value without setting it on the target.
         This is useful for lookups where we need the transformed value
@@ -180,7 +187,7 @@ class AbstractField(object):
 
     @abstractmethod
     def map_value(self, context):
-        # type: (context: ProcessingContext) -> None
+        # type: (ProcessingContext) -> None
         """
         Maps the value from the source to the target field.
 
@@ -196,35 +203,61 @@ class ProcessorMetaclass(ABCMeta):
     on RecordProcessor subclasses if `__processing_order__` is defined.
     """
     def __new__(cls, name, bases, attrs):
-        ordered_descriptors = []
-        class_meta = attrs.pop("Meta", type("Meta", (), {}))
-        meta = class_meta()
+        class_meta = attrs.pop("Meta", None)
+        if class_meta is None:
+            meta = None
+            for base in bases:
+                if hasattr(base, "meta"):
+                    meta = copy.deepcopy(getattr(base, "meta"))
+                    break
+            if meta is None:
+                meta = type("Meta", (), {})()
+        else:
+            meta = class_meta()
 
+        descr_dict = {}
+        
+        for base in bases:
+            if hasattr(base, "meta"):
+                base_meta = getattr(base, "meta")
+                if hasattr(base_meta, "fields"):
+                    for field in base_meta.fields:
+                        descr_dict[field.target_field] = field
+        for attr_name, attr_value in attrs.items():
+            if isinstance(attr_value, AbstractField):
+                descr_dict[attr_name] = attr_value
+
+        ordered_descriptors = []
 
         if '__processing_order__' in attrs:
             # If order is specified, enforce it
             processing_order = attrs['__processing_order__']
             for field_name in processing_order:
-                descriptor = attrs.get(field_name)
+                try:
+                    descriptor = descr_dict[field_name]
+                except KeyError:
+                    raise TypeError(
+                        "Field '%s' listed in `__processing_order__` is not defined in class %s." % (field_name, name)
+                    )
                 if not isinstance(descriptor, AbstractField):
                     raise TypeError(
                         "Field '%s' listed in `__processing_order__` is not a "
-                        "valid FieldDescriptor instance in class %s." % (field_name, name)
+                        "valid FieldDescriptor instance in class %s. %s" % (field_name, name, descriptor)
                     )
                 descriptor.target_field = field_name
                 ordered_descriptors.append(descriptor)
         else:
-            # If no order is specified, discover fields but do not guarantee order
+            # If no order is specified, discover fields and order as they were declared
             discovered_descriptors = []
-            for key, value in attrs.items():
-                if isinstance(value, AbstractField):
-                    value.target_field = key
-                    discovered_descriptors.append(value)
-            ordered_descriptors = discovered_descriptors
+            for field_name, descriptor in descr_dict.items():
+                descriptor.set_target_field(field_name)
+                discovered_descriptors.append(descriptor)
+            ordered_descriptors = sorted(discovered_descriptors, key=lambda x: x._creation_counter)
 
         # remove descriptor fields from their original location in order to clean up the scope
-        for each in ordered_descriptors:
-            del attrs[each.target_field]
+        for attr_name, attr_value in attrs.items():
+            if isinstance(attr_value, AbstractField):
+                del attrs[attr_name]
 
         meta.fields = ordered_descriptors
         target_bo_name = getattr(meta, "target_bo_name", None)
@@ -281,7 +314,7 @@ class AbstractProcessor(object):
 
     @classmethod
     def _assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition):
-        # type: (tr: ApiTransaction, attr_name: str, bot: ApiBOType, create_attrs: dict, condition: str) -> ApiBObject
+        # type: (ApiTransaction, str, ApiBOType, dict, str) -> ApiBObject
         """
         Helper method for creating properties of cached business objects.
         Asserts that a cached business object exists, or creates it if not under the given class attribute name.
@@ -343,7 +376,7 @@ class AbstractFactory(object):
     __metaclass__ = ABCMeta
 
     def __init__(self, source_repository, default_processor_class=None, rules=None):
-        # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor) -> None
+        # type: (AbstractRepository, AbstractProcessor, List[Callable]) -> None
         self._check_constructor_args(source_repository=source_repository, default_processor_class=default_processor_class, rules=rules)
         self.repository = source_repository
         self.is_chained = False
@@ -355,6 +388,7 @@ class AbstractFactory(object):
 
     @classmethod
     def as_chained(cls, default_processor_class=None, rules=None):
+        # type: (AbstractProcessor, List[Callable]) -> AbstractFactory
         """
         Alternative constructor!
         This is used when you need a full blown MappingProcessor for ChainedRelationField().
@@ -400,7 +434,7 @@ class AbstractFactory(object):
 
     @abstractmethod
     def process_all(self, tr, commit_batch_size=None):
-        # type: (tr: ApiTransaction, commit_batch_size: int) -> None
+        # type: (ApiTransaction, int) -> None
         """
         Contains the main loop and logic for processing all records from the
         repository.
@@ -409,7 +443,7 @@ class AbstractFactory(object):
 
     @abstractmethod
     def get_source_bo(self, tr, row_bo):
-        # type: (tr: ApiTransaction, row_bo: ApiBObject) -> ApiBObject
+        # type: (ApiTransaction, ApiBObject) -> ApiBObject
         """
         Find and return the source business object.
         """
@@ -417,7 +451,7 @@ class AbstractFactory(object):
 
     @abstractmethod
     def get_target_bo(self, tr, row_bo):
-        # type: (tr: ApiTransaction, row_bo: ApiBObject) -> ApiBObject
+        # type: (ApiTransaction, ApiBObject) -> ApiBObject
         """
         Find and return the target business object.
         """
@@ -437,7 +471,7 @@ class AbstractReconciler(object):
 
     @abstractmethod
     def run(self, tr, active_keys):
-        # type: (tr: ApiTransaction, active_keys: set) -> None
+        # type: (ApiTransaction, set) -> None
         """
         Runs the reconciliation process, deactivating target records that are
         no longer present in the source data.
@@ -450,7 +484,7 @@ class AbstractReconciler(object):
 
     @abstractmethod
     def deactivate_record(self, tr, bo):
-        # type: (tr: ApiTransaction, bo: ApiBObject) -> None
+        # type: (ApiTransaction, ApiBObject) -> None
         """
         Deactivate or delete the given record.
         """
@@ -490,12 +524,12 @@ class ProcessingContext(object):
         self._value_store = {}
 
     def store_value(self, field, value):
-        # type: (field: AbstractField, value: Any) -> None
+        # type: (AbstractField, Any) -> None
         field_name = field.target_field
         self._value_store[field_name] = value
 
     def get_value(self, field):
-        # type: (field: AbstractField) -> Any
+        # type: (AbstractField) -> Any
         field_name = field.target_field
         return self._value_store.get(field_name, undefined)
 
@@ -586,7 +620,7 @@ class PlainField(AbstractField):
     """A descriptor for mapping simple, direct field-to-field values."""
 
     def __init__(self, source_field, processor_func=None, match_key=False, **kwargs):
-        # type: (source_field: str, processor_func: callable) -> None
+        # type: (str, callable, bool, **Any) -> None
         """
         Initializes the field descriptor.
         Arguments:
@@ -999,7 +1033,7 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
     ###########################################
 
     def __init__(self, source_repository, default_processor_class=None, rules=None):
-        # type: (source_repository: AbstractRepository, default_processsor_class: AbstractProcessor, rules: List[Tuple]) -> None
+        # type: (AbstractRepository, AbstractProcessor, List[Tuple]) -> None
         super(RelationProcessorFactoryBase, self).__init__(source_repository, default_processor_class, rules)
         cls = type(self)
         self.source_bo_type = VM.getBOType(cls.source_bo_name)
@@ -1020,7 +1054,7 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
         for row_bo in self.repository.get_unprocessed_records(tr):
 
             try:
-                self._process_row(tr, row_bo)
+                self.process_row(tr, row_bo)
             except Exception as e:
                 self.failed_count += 1
                 if isinstance(e, AmbiguousProcessorError):
@@ -1124,7 +1158,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             `matcher(staging_record: Any) -> bool`
     """
     def __init__(self, repository, default_processor_class=None, target_bo_name=None, source_key=None, target_key=None, rules=None):
-        # type: (repository: AbstractRepository, default_processor_class: AbstractProcessor, target_bo_name: str, source_key: str, target_key: str, rules: List[Tuple]) -> None
+        # type: (AbstractRepository, AbstractProcessor, str, str, str, List[Tuple]) -> None
         super(MappingProcessorFactory, self).__init__(repository, default_processor_class=default_processor_class, rules=rules)
         self._setup_mapping(target_bo_name=target_bo_name, source_key=source_key, target_key=target_key)
 
@@ -1219,7 +1253,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
     def process_all(self, tr, commit_batch_size=None):
         iterator = self.repository.get_unprocessed_records(tr)
         if commit_batch_size:
-            iterator.commitedAfter(commit_batch_size)
+            iterator.committedAfter(commit_batch_size)
 
         for record in iterator:
             source_record = self.get_source_bo(tr, record)
@@ -1259,7 +1293,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                     log_(error_message, VM.LOG_ERROR, record)
 
     def process_chained(self, context):
-        # type: (context: ProcessingContext) -> ApiBObject
+        # type: (ProcessingContext) -> ApiBObject
         """
         Resolve (find-or-create) and map a single related target BO for a chained
         relationship, driven by the parent's source record.
