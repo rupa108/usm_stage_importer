@@ -436,10 +436,27 @@ class AbstractFactory(object):
     def process_all(self, tr, commit_batch_size=None):
         # type: (ApiTransaction, int) -> None
         """
-        Contains the main loop and logic for processing all records from the
-        repository.
+        Contains the main loop that iterates over all records from the
+        repository, delegating the per-record work to :meth:`process_row` and
+        taking care of error accounting and batch commits.
         """
         raise NotImplementedError("Subclasses must implement process_all()")
+
+    @abstractmethod
+    def process_row(self, tr, row_bo):
+        # type: (ApiTransaction, ApiBObject) -> ApiBObject
+        """
+        Process a single record from the repository and return the resulting
+        target business object (or ``undefined`` when the record was skipped).
+
+        This is the natural per-record extension point of a factory. Overriding
+        it gives full control over how one record is turned into a target BO,
+        while the surrounding :meth:`process_all` loop continues to handle
+        iteration, error accounting and commits. For most customizations the
+        dedicated hooks (:meth:`prepare_source_record`, :meth:`should_process`,
+        :meth:`build_processor`, etc.) are preferable to overriding this method.
+        """
+        raise NotImplementedError("Subclasses must implement process_row()")
 
     @abstractmethod
     def get_source_bo(self, tr, row_bo):
@@ -456,6 +473,91 @@ class AbstractFactory(object):
         Find and return the target business object.
         """
         raise NotImplementedError("Subclasses must implement get_target_bo()")
+
+    # --------------------------------------------------------------------------
+    # Customization hooks
+    #
+    # These hooks are the intended extension points of a factory. Subclasses can
+    # override them to mangle/enrich the data provided by the repository or to
+    # customize how processors are instantiated, without having to re-implement
+    # the whole `process_all` loop. All base implementations preserve the
+    # default behaviour, so overriding is entirely optional.
+    # --------------------------------------------------------------------------
+
+    def prepare_source_record(self, tr, row_bo):
+        # type: (ApiTransaction, ApiBObject) -> ApiBObject
+        """
+        Hook to normalize or enrich a raw staging record before it is used.
+
+        Called once per record (after :meth:`get_source_bo`) before the target
+        BO is resolved and before mapping happens. Override this to mangle the
+        data provided by the repository, e.g. to trim/upcase key fields, derive
+        additional values, or look up reference data.
+
+        Returning ``None`` (or :data:`undefined`) signals that the record should
+        be skipped.
+
+        The base implementation returns the record unchanged.
+        """
+        return row_bo
+
+    def should_process(self, tr, source_record):
+        # type: (ApiTransaction, ApiBObject) -> bool
+        """
+        Hook to decide whether a (prepared) source record should be processed.
+
+        Override to implement a per-record filter. Returning ``False`` skips the
+        record entirely (no target is resolved and no processor is built).
+
+        The base implementation processes every record.
+        """
+        return True
+
+    def build_processor(self, tr, processor_class, source_bo, target_bo, **kwargs):
+        # type: (ApiTransaction, type, ApiBObject, ApiBObject, **kwargs) -> AbstractProcessor
+        """
+        Hook that is the single place where processors are instantiated.
+
+        Override this to customize processor construction, e.g. to pass extra
+        constructor arguments, inject shared services/caches, or wrap the
+        processor instance. All factory code routes processor creation through
+        this method.
+
+        The base implementation simply constructs ``processor_class`` with the
+        given arguments.
+        """
+        return processor_class(tr, source_bo, target_bo, **kwargs)
+
+    def on_target_created(self, tr, target_bo, source_record):
+        # type: (ApiTransaction, ApiBObject, ApiBObject) -> None
+        """
+        Hook invoked when a brand new target BO has been created for a record.
+
+        Override for cross-cutting logic on creation (e.g. stamping audit
+        fields). The base implementation does nothing.
+        """
+        pass
+
+    def on_target_found(self, tr, target_bo, source_record):
+        # type: (ApiTransaction, ApiBObject, ApiBObject) -> None
+        """
+        Hook invoked when an existing target BO has been matched for a record.
+
+        Override for cross-cutting logic on update. The base implementation does
+        nothing.
+        """
+        pass
+
+    def on_record_failed(self, tr, row_bo, exc):
+        # type: (ApiTransaction, ApiBObject, Exception) -> None
+        """
+        Hook invoked when processing a record raised an exception.
+
+        Called after the framework has accounted for the failure (counters,
+        logging). Override for custom error handling, such as writing the error
+        back to the staging record. The base implementation does nothing.
+        """
+        pass
 
     def get_summary(self):
         return "Successfully processed: %d\nFailed: %d" % (self.processed_count, self.failed_count)
@@ -753,6 +855,31 @@ class RelationField(AbstractField):
                 target BO, transaction, and value storage.
         """
 
+        result = self.get_processed_value(context)
+        context.store_value(self, result)
+
+    def get_processed_value(self, context):
+        """Resolve the related BO for this mapping without storing it.
+
+        Applies the same resolution strategies as :meth:`map_value` (processor
+        function, ``target_lookup_field`` or ``target_lookup_func``, optionally
+        followed by find-or-create) and returns the resolved value. This is the
+        value :meth:`map_value` stores on the context and is also used when a
+        ``RelationField`` acts as a match key (see
+        ``MappingProcessorFactory.get_target_bo``).
+
+        Returns one of:
+
+        * ``CLEAR_LINK`` — the source lookup value is empty and no
+          ``target_lookup_func`` is configured.
+        * A related BO instance — resolved successfully.
+        * ``undefined`` — nothing actionable (processor skipped, lookup failed,
+          or no strategy applied).
+
+        Args:
+            context: The mapping context providing access to the source BO,
+                target BO, transaction, and value storage.
+        """
         lookup_value = self.get_lookup_value(context)
 
         result = undefined
@@ -782,7 +909,7 @@ class RelationField(AbstractField):
                          % (lookup_value, self.target_bo_name), VM.LOG_DEBUG, context.source)
                     # result stays undefined
 
-        context.store_value(self, result)
+        return result
 
 
     def set_target_value(self, context):
@@ -848,7 +975,7 @@ class ChainedRelationField(RelationField):
     This is useful for handling more complex relationships that require multiple fields
     or custom logic to resolve.
     """
-    def __init__(self, source_field, processor_or_factory, processor_func=None, **kwargs):
+    def __init__(self, source_field, processor_or_factory, **kwargs):
         if isinstance(processor_or_factory, AbstractFactory):
             self.factory = processor_or_factory
             assert self.factory.is_chained, \
@@ -867,26 +994,18 @@ class ChainedRelationField(RelationField):
         target_bo_name = target_type.getName()
 
         super(ChainedRelationField, self).__init__(
-            source_field, target_bo_name, processor_func=processor_func, **kwargs)
+            source_field, target_bo_name, **kwargs)
 
     def map_value(self, context):
         lookup_value = self.get_lookup_value(context)
 
-        result = None
-
         if not lookup_value:
-            # Mirror RelationField semantics: an empty lookup clears the link.
             result = CLEAR_LINK
-        elif self.processor_func:
-            # A processor_func is given the chance to short-circuit resolution.
-            # It may return a BO, CLEAR_LINK, or undefined to skip; only when it
-            # explicitly returns undefined do we fall through to the chained factory.
-            result = self.processor_func(context, lookup_value)
-
-        if result is None:
+        else:
             result = self.factory.process_chained(context)
 
-        context.store_value(self, result)
+        if result is not undefined:
+            context.store_value(self, result)
  
 
 # ==============================================================================
@@ -1065,6 +1184,8 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
                 else:
                     error_message = str(e)
                 log_(error_message, VM.LOG_ERROR, row_bo)
+                # Hook C: custom error handling.
+                self.on_record_failed(tr, row_bo, e)
             except:
                 log_("Failed to process %s" % row_bo.getMoniker(), VM.LOG_ERROR, row_bo)
                 log_(traceback.format_exc(), VM.LOG_EXCEPTION, row_bo)
@@ -1100,23 +1221,44 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
 
         return target_bo
 
-    def _process_row(self, tr, row_bo):
+    def process_row(self, tr, row_bo):
+        # type: (ApiTransaction, ApiBObject) -> ApiBObject
         """
-        Processes a single row from the data source.
+        Processes a single relationship row from the data source: resolves the
+        source and target BOs and creates the relationship between them.
+
+        This is the per-record extension point of the relationship factory. The
+        surrounding :meth:`process_all` loop calls it for every row and handles
+        error accounting. Returns the related target BO, or :data:`undefined`
+        when the row was skipped.
         """
+        # Hook B: allow subclasses to mangle/enrich the raw relationship row.
+        row_bo = self.prepare_source_record(tr, row_bo)
+        if row_bo is None or row_bo is undefined:
+            return undefined
+        # Hook C: per-record filter.
+        if not self.should_process(tr, row_bo):
+            log_("Skipping relationship row '%s' (should_process returned False)." % row_bo.getMoniker(), VM.LOG_DEBUG, row_bo)
+            return undefined
         source_bo = self.get_source_bo(tr, row_bo)
         target_bo = self.get_target_bo(tr, row_bo)
         if not source_bo or not target_bo:
             log_("Source or target BO not found for row: %s" % row_bo.getMoniker(), VM.LOG_WARN, row_bo)
-            return
+            return undefined
         ProcessorClass = self._get_processor_class(tr, row_bo)
-        processor = ProcessorClass(tr, source_bo, target_bo, row_bo=row_bo)
+        # Hook A: route processor instantiation through the build hook.
+        processor = self.build_processor(tr, ProcessorClass, source_bo, target_bo, row_bo=row_bo)
         processor.pre_process()
         processor.process()
         processor.post_process()
         self.active_target_keys.add(source_bo.getMoniker())
         self.active_target_keys.add(target_bo.getMoniker())
         self.active_target_keys.update(processor.get_active_keys())
+        return target_bo
+
+    def _process_row(self, tr, row_bo):
+        """Deprecated alias for :meth:`process_row`, kept for backward compatibility."""
+        return self.process_row(tr, row_bo)
 
     def get_summary(self):
         return "Processed relationship links: %d\nFailed rows: %d" % (self.processed_count, self.failed_count)
@@ -1256,25 +1398,17 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             iterator.committedAfter(commit_batch_size)
 
         for record in iterator:
-            source_record = self.get_source_bo(tr, record)
+            # The per-record work lives in process_row(); the loop is only
+            # responsible for iteration, error accounting and commits. The private
+            # _process_record() also reports whether a brand new BO was created so
+            # that it can be rolled back on a ValidationError.
             created = None
+            target_bo = None
             try:
-                processor_class = self._get_processor_class(tr, source_record)
-                target_bo, created = self._get_or_create_target(tr, source_record, processor_class)
-                if created:
-                    log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, record)
-                else:
-                    if self._skip_update(target_bo):
-                        log_("Skipping update of '%s' for record '%s'." % (target_bo.getMoniker(), record.getMoniker()), VM.LOG_DEBUG, target_bo)
-                        continue
-                processor_instance = processor_class(tr, source_record, target_bo, created)
-                processor_instance.pre_process()
-                processor_instance.process()
-                processor_instance.post_process()
-
-                self.active_target_keys.update(processor_instance.get_active_keys())
-
-                self._mark_as_processed(record, "PROCESSED", processor_instance.message)
+                target_bo, created = self._process_record(tr, record)
+                if target_bo is undefined:
+                    continue
+                self._mark_as_processed(record, "PROCESSED")
                 self.processed_count += 1
             except Exception as e:
                 self.failed_count += 1
@@ -1283,7 +1417,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                     error_message += " Conflicting processors: %s" % e.matching_processors
                 elif isinstance(e, ValidationError):
                     error_message = "%s: %s" % (type(e).__name__, e.message)
-                    if created:
+                    if created and target_bo and target_bo is not undefined:
                         target_bo.remove()
                 else:
                     error_message = None
@@ -1291,6 +1425,73 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
                 self._mark_as_processed(record, "FAILED", error_message)
                 if error_message:
                     log_(error_message, VM.LOG_ERROR, record)
+                # Hook C: custom error handling.
+                self.on_record_failed(tr, record, e)
+
+    def process_row(self, tr, record):
+        # type: (ApiTransaction, ApiBObject) -> ApiBObject
+        """
+        Resolve (find-or-create) and map the target BO for a single staging
+        record, running the full processor lifecycle.
+
+        This is the per-record extension point of the mapping factory. The
+        surrounding :meth:`process_all` loop calls it for every record and takes
+        care of error accounting and commits, while :meth:`process_chained`
+        reuses it for chained relations.
+
+        Returns the resolved/mapped target BO, or :data:`undefined` when the
+        record was skipped (filtered out, no matching processor, or a skipped
+        update).
+        """
+        target_bo, _created = self._process_record(tr, record)
+        return target_bo
+
+    def _process_record(self, tr, record):
+        # type: (ApiTransaction, ApiBObject) -> tuple
+        """
+        Internal worker for :meth:`process_row` that additionally reports whether
+        the target BO was newly created.
+
+        Returns a ``(target_bo, created)`` tuple. ``target_bo`` is :data:`undefined`
+        when the record was skipped, in which case ``created`` is ``False``.
+        """
+        # Hook B: allow subclasses to mangle/enrich the raw staging record.
+        source_record = self.prepare_source_record(tr, self.get_source_bo(tr, record))
+        if source_record is None or source_record is undefined:
+            log_("Skipping record '%s' (prepare_source_record returned no record)." % record.getMoniker(), VM.LOG_DEBUG, record)
+            return undefined, False
+
+        # Hook C: per-record filter.
+        if not self.should_process(tr, source_record):
+            log_("Skipping record '%s' (should_process returned False)." % record.getMoniker(), VM.LOG_DEBUG, record)
+            return undefined, False
+
+        processor_class = self._get_processor_class(tr, source_record)
+        if not processor_class:
+            log_("No processor class matched for record '%s'." % source_record.getMoniker(), VM.LOG_WARN, source_record)
+            return undefined, False
+
+        target_bo, created = self._get_or_create_target(tr, source_record, processor_class)
+        if created:
+            log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, record)
+            # Hook C: notify on creation.
+            self.on_target_created(tr, target_bo, source_record)
+        else:
+            if self._skip_update(target_bo):
+                log_("Skipping update of '%s' for record '%s'." % (target_bo.getMoniker(), record.getMoniker()), VM.LOG_DEBUG, target_bo)
+                return undefined, False
+            # Hook C: notify on match.
+            self.on_target_found(tr, target_bo, source_record)
+
+        # Hook A: route processor instantiation through the build hook.
+        processor_instance = self.build_processor(tr, processor_class, source_record, target_bo, is_create=created)
+        processor_instance.pre_process()
+        processor_instance.process()
+        processor_instance.post_process()
+
+        self.active_target_keys.update(processor_instance.get_active_keys())
+
+        return target_bo, created
 
     def process_chained(self, context):
         # type: (ProcessingContext) -> ApiBObject
@@ -1314,25 +1515,16 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         assert self.is_chained, "process_chained() may only be called on a factory built via as_chained()."
 
         tr = context.get_transaction()
-        source_record = context.get_source()
-
-        processor_class = self._get_processor_class(tr, source_record)
-        if not processor_class:
-            log_("No processor class matched for chained relation on '%s'."
-                 % source_record.getMoniker(), VM.LOG_WARN, source_record)
+        # Reuse the shared per-record logic. The parent's source record acts as
+        # the staging record here; process_row() handles preparation, filtering,
+        # find-or-create and the full processor lifecycle.
+        target_bo = self.process_row(tr, context.get_source())
+        if target_bo is undefined:
             return undefined
 
-        target_bo, created = self._get_or_create_target(tr, source_record, processor_class)
-
-        processor_instance = processor_class(tr, source_record, target_bo, created)
-        processor_instance.pre_process()
-        processor_instance.process()
-        processor_instance.post_process()
-
         # Propagate touched objects up to the parent context so the related BO (and
-        # anything it touched) is counted as active during reconciliation.
-        for moniker in processor_instance.get_active_keys():
-            self.active_target_keys.add(moniker)
+        # anything it touched) is counted as active during reconciliation. The keys
+        # were already collected onto self.active_target_keys by process_row().
         context.add_touched_object(target_bo)
 
         return target_bo
@@ -1447,36 +1639,3 @@ class ImportOrchestrator(object):
             raise
         log_("--- Import Orchestrator Finished ---", VM.LOG_INFO)
 
-
-####################################################################################################
-# TEST
-####################################################################################################
-
-    
-class TestStageSystemProcessor(MappingProcessor):
-    __processiong_order__ = ("name", "systype", "status","compsystems")
-    name = PlainField(source_field="stageName")
-    status = PlainField(source_field="stageStatus")
-    systype = RelationField(source_field="stageType",target_bo_name="Systype", target_lookup_field="systype")
-    compsystems = RelationField(source_field="component",target_bo_name="Component", target_lookup_field="ident")
-
-
-def main():
-    repo = StagingRepository("XStageTest")
-    factory = MappingProcessorFactory(
-        repository=repo,
-        default_processor_class=TestStageSystemProcessor,
-        target_bo_name = "System",
-        source_key = "stageName",
-        target_key = "name",
-    )
-    recon_baseline = ReconciliationBaseline("System", "datcre > 2025-07-17")
-    reconciler = Reconciler(recon_baseline)
-    orchestator = ImportOrchestrator(
-        factories=[factory],
-        reconcilers=[reconciler],
-    )
-    orchestator.run()
-
-if __name__ == "__main__":
-    main()
