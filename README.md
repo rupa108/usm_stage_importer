@@ -151,3 +151,9 @@ class AdvancedSystemProcessor(MappingProcessor):
         current_desc = self.target.getBOField("description").getValue()
         self.target.getBOField("description").setValue(current_desc + " [Processed by framework]")
 ```
+### Run unit tests
+In the root directory run:
+```console
+> jython -m unittest discover -vvv
+```
+python27 should also work. Howerver better use jython since the code will eventually be run by a version of jython.
