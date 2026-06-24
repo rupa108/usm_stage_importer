@@ -1380,7 +1380,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
 
         return target_bo
 
-    def _get_or_create_target(self, tr, staging_record, processor_class):
+    def get_or_create_target(self, tr, staging_record, processor_class):
         target_bo = self.get_target_bo(tr, staging_record, processor_class)
         if not target_bo:
             generate_key = self.generate_key if self.generate_key is not None else processor_class.generate_key()
@@ -1471,7 +1471,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             log_("No processor class matched for record '%s'." % source_record.getMoniker(), VM.LOG_WARN, source_record)
             return undefined, False
 
-        target_bo, created = self._get_or_create_target(tr, source_record, processor_class)
+        target_bo, created = self.get_or_create_target(tr, source_record, processor_class)
         if created:
             log_("Created new target object '%s' for record." % target_bo.getMoniker(), VM.LOG_DEBUG, record)
             # Hook C: notify on creation.
