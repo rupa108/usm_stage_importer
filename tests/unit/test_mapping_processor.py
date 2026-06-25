@@ -1,5 +1,5 @@
 import unittest
-from mock import MagicMock, patch
+from mock import MagicMock
 from tests.lib import test_support
 
 VM = test_support.bootstrap()
@@ -24,6 +24,10 @@ class ExampleProcessor2(ExampleProcessor):
     __processing_order__ = ("pk", "status", "name", "type")
 
 class TestMappingProcessor(unittest.TestCase):
+
+    def setUp(self):
+        self.vm = VM
+        self.tr = test_support.reset_environment(self.vm)
 
     def _createBO(self, bo_type_name, initial_dict=None):
         bo = VM.getBOType(bo_type_name).createBO()

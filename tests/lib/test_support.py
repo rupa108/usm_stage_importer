@@ -84,7 +84,7 @@ def bootstrap():
     Must be called *before* importing :mod:`stage_importer_framework`.
     """
     install_fake_usm_module()
-    return install_fake_vm_builtin()
+    return VM
 
 
 def reset_environment(vm):

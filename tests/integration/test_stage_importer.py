@@ -1,18 +1,4 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for :mod:`stage_importer_framework`.
-
-These tests exercise the framework end-to-end *without* depending on the real
-USM runtime. The harness that stubs out ``de.usu.s3.api`` and the global ``VM`` /
-``transaction`` objects (backed by the in-memory fakes in
-:mod:`tests.lib.fake_bo`) lives in :mod:`tests.lib.test_support`.
-
-Run with::
-
-    jython -m unittest discover
-    # or, under CPython 2:
-    python -m unittest discover
-"""
-
 import unittest
 
 from tests.lib import test_support
@@ -101,7 +87,6 @@ class StageImporterTestCase(unittest.TestCase):
         self.assertEqual(len(systems), 2)
 
         by_key = dict((s.getBOField("systemname").getValue(), s) for s in systems)
-        #import pdb; pdb.set_trace()
         self.assertIn("CI-1", by_key)
         self.assertIn("CI-2", by_key)
 
@@ -167,10 +152,7 @@ class StageImporterTestCase(unittest.TestCase):
 
         factory = MappingProcessorFactory(
             repository=StagingRepository("StagingSystem"),
-            default_processor_class=FlakyProcessor,
-            target_bo_name="System",
-            source_key="CI_NR",
-            target_key="systemname",
+            default_processor_class=FlakyProcessor,  
         )
         ImportOrchestrator(factories=[factory], tr=self.tr).run()
 

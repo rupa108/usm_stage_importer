@@ -1,5 +1,5 @@
 import unittest
-from mock import MagicMock, patch
+from mock import MagicMock, Mock, call
 from tests.lib import test_support
 
 VM = test_support.bootstrap()
@@ -29,6 +29,8 @@ class ExampleProcessor(MappingProcessor):
 
 class TestMappingProcessorFactory(unittest.TestCase):
     def setUp(self):
+        self.vm = VM
+        self.tr = test_support.reset_environment(self.vm)        
         self.existing_bo1 = self._createBO("ExampleBO", {'pk': 'CI-10-2340943', 'name': 'MyCI1'})
         self.existing_bo2 = self._createBO("ExampleBO", {'pk': 'CI-10-2340944', 'name': 'MyCI2'})
         self.row_bo1 = self._createBO("ExampleStagingBO", {'ID': 'CI-10-2340943', 'NAME': 'MyCI1',"TYPE": "alt"})
@@ -39,11 +41,9 @@ class TestMappingProcessorFactory(unittest.TestCase):
             repository=StagingRepository(staging_bo_name="ExampleStagingBO"),
             default_processor_class=ExampleProcessor,
         )
-
         
     def tearDown(self):
-        VM.reset()
-
+        self.vm.reset()
 
     def _createBO(self, bo_type_name, initial_dict=None):
         bo = VM.getBOType(bo_type_name).createBO()
@@ -199,7 +199,84 @@ class TestMappingProcessorFactory(unittest.TestCase):
         type_bo2 = result.getBOField("type").getObject()
         self.assertEqual(type_bo1, type_bo2)
     
+class TestMappingProcessorFactoryHooks(unittest.TestCase):
 
+    def tearDown(self):
+        VM.reset()
+
+    def test_factory_lifecycle_hooks_are_called_in_correct_order(self):
+        
+        mock_record = Mock(name="StagingRecord")
+        mock_record.getMoniker.return_value = "Staging_BO_1"
+        
+        mock_target_bo = Mock(name="TargetBusinessObject")
+        mock_target_bo.getMoniker.return_value = "Target_BO_1"
+
+        mock_repo = Mock(spec=StagingRepository)
+        mock_repo.get_unprocessed_records.return_value = [mock_record]
+
+        factory = MappingProcessorFactory(
+            repository=mock_repo,
+            default_processor_class=ExampleProcessor,
+        )
+
+        factory.get_or_create_target = Mock(return_value=(mock_target_bo, True))
+        factory._mark_as_processed = Mock()
+
+        mock_processor_instance = MagicMock(name="ProcessorInstance")
+
+        spy_manager = Mock()
+
+        factory.prepare_source_record = Mock(return_value=mock_record)
+        factory.should_process = Mock(return_value=True)
+        factory.on_target_created = Mock()
+        factory.build_processor = Mock(return_value=mock_processor_instance)
+
+        spy_manager.attach_mock(factory.prepare_source_record, 'prepare_source_record')
+        spy_manager.attach_mock(factory.should_process, 'should_process')
+        spy_manager.attach_mock(factory.on_target_created, 'on_target_created')
+        spy_manager.attach_mock(factory.build_processor, 'build_processor')
+
+        factory.process_all(transaction)
+
+        factory.prepare_source_record.assert_called_once()
+        factory.should_process.assert_called_once()
+        factory.on_target_created.assert_called_once()
+        factory.build_processor.assert_called_once()
+
+
+        expected_calls_sequence = [
+            call.prepare_source_record(transaction, mock_record),
+            call.should_process(transaction, mock_record),
+            call.on_target_created(transaction, mock_target_bo, mock_record),
+            call.build_processor(transaction, ExampleProcessor, mock_record, mock_target_bo, is_create=True)
+        ]
+        
+        spy_manager.assert_has_calls(expected_calls_sequence, any_order=False)
+
+
+    def test_factory_lifecycle_with_existing_target(self):
+        mock_record = Mock(name="StagingRecord")
+        mock_target_bo = Mock(name="TargetBusinessObject")
+        
+        mock_repo = Mock(spec=StagingRepository)
+        mock_repo.get_unprocessed_records.return_value = [mock_record]
+
+        factory = MappingProcessorFactory(mock_repo, default_processor_class=ExampleProcessor)
+        
+        factory.get_or_create_target = Mock(return_value=(mock_target_bo, False))
+        factory._skip_update = Mock(return_value=False)
+        factory._mark_as_processed = Mock()
+        factory.build_processor = Mock(return_value=MagicMock())
+
+        factory.on_target_found = Mock()
+
+        factory.process_all(transaction)
+
+        factory.on_target_found.assert_called_once_with(transaction, mock_target_bo, mock_record)
+
+if __name__ == '__main__':
+    unittest.main()
         
 
 

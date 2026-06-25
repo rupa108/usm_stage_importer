@@ -15,6 +15,8 @@ The module is Python 2 / Jython compatible (the framework targets that runtime).
 # ==============================================================================
 # Business object field
 # ==============================================================================
+class ConfigurationError(BaseException):
+    pass
 
 class FakeBoField(object):
     """A single attribute of a :class:`FakeBo`.
@@ -355,6 +357,16 @@ class FakeVMApi(object):
 
     def configure_type(self, name, business_key_attr=None, object_link_fields=None, collection_fields=None):
         """Register metadata for a BO type so links/keys behave correctly."""
+        if name in self._type_config:
+            config = self._type_config[name]
+            updates = (
+                business_key_attr != config["business_key_attr"],
+                sorted(object_link_fields or []) != sorted(config["object_link_fields"]),
+                sorted(collection_fields or []) != sorted(config["collection_fields"]),
+            )
+            if any(updates):
+                raise ConfigurationError("Type <%s> allread configured. Reconfiguration not allowed!" % name)
+            
         self._type_config[name] = {
             "business_key_attr": business_key_attr,
             "object_link_fields": object_link_fields or [],

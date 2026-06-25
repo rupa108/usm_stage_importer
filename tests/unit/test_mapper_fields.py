@@ -3,7 +3,7 @@ from mock import MagicMock, patch
 from tests.lib import test_support
 
 VM = test_support.bootstrap()
-VM.configure_type("ExampleBO", business_key_attr="pk", object_link_fields=["mytype"])
+VM.configure_type("ExampleBO", business_key_attr="pk", object_link_fields=["type"])
 VM.configure_type("TypeBO", business_key_attr="type_name")
 
 from stage_importer_framework import (
@@ -12,17 +12,19 @@ from stage_importer_framework import (
     StaticField,
     RelationField,
     ChainedRelationField,
-    ProcessingContext,
     CLEAR_LINK,
     undefined,
     Static,
     FromSource,
     FromAnywhere,
-    ValueSource
 )
 
 
 class TestMapperFields(unittest.TestCase):
+
+    def setUp(self):
+        self.vm = VM
+        self.tr = test_support.reset_environment(self.vm)
 
     def test_plain_field(self):
         field = PlainField(source_field="source", match_key=True)
@@ -278,7 +280,7 @@ class TestMapperFields(unittest.TestCase):
         context.target_bo = target_bo
 
         field = ChainedRelationField("type_name", processor_or_factory=TypeMappingProcessor)
-        field.set_target_field("mytype")
+        field.set_target_field("type")
         field.map_value(context)
         
         self.assertTrue(context.store_value.called)
@@ -288,7 +290,7 @@ class TestMapperFields(unittest.TestCase):
 
         context.get_value.return_value = call_args[1]
         field.set_target_value(context)
-        target_field = target_bo.getBOField("mytype")
+        target_field = target_bo.getBOField("type")
         self.assertEqual(target_field.getObject().getBOField("type_name").getValue(), "example_type")
 
 

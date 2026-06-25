@@ -154,6 +154,6 @@ class AdvancedSystemProcessor(MappingProcessor):
 ## Run unit tests
 In the root directory run:
 ```console
-> jython -m unittest discover -vvv
+> jython run_tests.py 
 ```
-python27 should also work. Howerver better use jython since the code will eventually be run by a version of jython.
+python27 should also work. However better use jython since the code will eventually be run by a version of jython.
