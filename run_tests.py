@@ -8,7 +8,7 @@ install_fake_vm_builtin()
 if __name__ == '__main__':
     # 2. Discover and run your tests normally
     loader = unittest.TestLoader()
-    suite = loader.discover(start_dir='tests') # Point this to your tests directory
+    suite = loader.discover(start_dir='tests') #, pattern="*relation*.py")
     
     runner = unittest.TextTestRunner(verbosity=3, buffer=True)
     result = runner.run(suite)

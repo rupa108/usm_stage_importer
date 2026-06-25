@@ -70,8 +70,9 @@ class FakeBoField(object):
 class FakeCollection(object):
     """A minimal stand-in for a USM collection field."""
 
-    def __init__(self):
-        self._items = []
+    def __init__(self, items=None):
+        self._items = items or []
+        assert isinstance(self._items, list)
         self._links = {}
 
     def indexOf(self, target):
@@ -99,9 +100,15 @@ class FakeCollection(object):
 
     def items(self):
         return list(self._items)
-
+    
+    def get(self, index):
+        return self._items[index]
+    
     def __repr__(self):
         return "<FakeCollection %r>" % (self._items,)
+    
+    def __iter__(self):
+        return iter(self._items)
 
 
 class FakeBoFields(object):
@@ -366,7 +373,6 @@ class FakeVMApi(object):
             )
             if any(updates):
                 raise ConfigurationError("Type <%s> allread configured. Reconfiguration not allowed!" % name)
-            
         self._type_config[name] = {
             "business_key_attr": business_key_attr,
             "object_link_fields": object_link_fields or [],
@@ -397,4 +403,20 @@ class FakeVMApi(object):
 
     def persistentLogMessage(self, domain, message, a, b, bo, level, flag):
         self.log_messages.append((domain, message, level))
+
+    def create_bo(self, bo_type, **kwargs):
+        bo = self.getBOType(bo_type).createBO()
+        for k, v in kwargs.items():
+            bo_field = bo.getBOField(k)
+            if bo_field.isCollectionLink():
+                collection = bo_field.getCollection()
+                for item in v:
+                    collection.add(item)            
+            elif bo_field.isObjectLink():
+                bo_field.setObject(v)
+
+            else:
+                bo_field.setValue(v)
+        return bo
+
 

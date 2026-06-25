@@ -72,7 +72,7 @@ def install_fake_vm_builtin():
     # `target_type` against this VM at *import time* (via the metaclass), so the
     # same VM instance must stay in use for the lifetime of the test module; we
     # only reset its stores between tests for isolation.
-    vm.configure_type("System", business_key_attr="systemname")
+    vm.configure_type("System", business_key_attr="systemname", object_link_fields=("systype", "parent_system"), collection_fields=("outgoing_systems", "incoming_systems"))
     builtins.VM = vm
     builtins.transaction = fake_bo.FakeTransaction()
     return vm
