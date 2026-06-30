@@ -175,7 +175,7 @@ class TestMappingProcessorFactory(unittest.TestCase):
 
     def test_process_row(self):
         type_bo1 = self._createBO("TypeBO", {"type_name": "alt"})
-        result = self.factory.process_row(transaction, self.row_bo1)
+        result, created = self.factory.process_row(transaction, self.row_bo1)
         self.assertEqual(result, self.existing_bo1)
         type_bo2 = result.getBOField("type").getObject()
         self.assertEqual(type_bo1, type_bo2)

@@ -124,6 +124,37 @@ def link_nm(source, target, rel_name, **kwargs):
 
     return link
 
+
+def assert_cached_bo(cache_holder, tr, attr_name, bot, create_attrs, condition):
+    # type: (Any, ApiTransaction, str, ApiBOType, dict, str) -> ApiBObject
+    """
+    Helper method for creating properties of cached business objects.
+    Asserts that a cached business object exists, or creates it if not under the given class attribute name.
+
+    Attributes:
+        cache_holder (Any): The object that holds the chache. Typically a class.
+        tr (ApiTransaction): The transaction context.
+        attr_name (str): The name of the class attribute to store the cached BO.
+        bot (ApiBOType): The business object type to create or retrieve.
+        create_attrs (dict): Attributes to use when creating a new BO if it does not exist.
+        condition (str): Condition to find the BO in the transaction.
+    """
+    bo = getattr(cls, attr_name)
+    if not bo:
+        bo = get_bo(tr, bot, condition)
+        if not bo:
+            generate_key = True if bot.getBusinessKeyAttrName() else False
+            bo = bot.createBO(tr, generate_key)
+            for att_name, value in create_attrs.items():
+                bo.getBOField(att_name).setValue(value)
+
+        setattr(cls, attr_name, bo)
+
+    if not tr.containsBO(bo):
+        bo = tr.get(bo)
+
+    return bo
+
 # ==============================================================================
 # 2. CORE LIBRARY ABSTRACT CLASSES
 # ==============================================================================
@@ -196,6 +227,9 @@ class AbstractField(object):
         """
         pass
 
+    @classmethod
+    def _assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition):
+        return assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition)
 
 class ProcessorMetaclass(ABCMeta):
     """
@@ -216,7 +250,7 @@ class ProcessorMetaclass(ABCMeta):
             meta = class_meta()
 
         descr_dict = {}
-        
+
         for base in bases:
             if hasattr(base, "meta"):
                 base_meta = getattr(base, "meta")
@@ -314,33 +348,7 @@ class AbstractProcessor(object):
 
     @classmethod
     def _assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition):
-        # type: (ApiTransaction, str, ApiBOType, dict, str) -> ApiBObject
-        """
-        Helper method for creating properties of cached business objects.
-        Asserts that a cached business object exists, or creates it if not under the given class attribute name.
-
-        Attributes:
-            tr (ApiTransaction): The transaction context.
-            attr_name (str): The name of the class attribute to store the cached BO.
-            bot (ApiBOType): The business object type to create or retrieve.
-            create_attrs (dict): Attributes to use when creating a new BO if it does not exist.
-            condition (str): Condition to find the BO in the transaction.
-        """
-        bo = getattr(cls, attr_name)
-        if not bo:
-            bo = get_bo(tr, bot, condition)
-            if not bo:
-                generate_key = True if bot.getBusinessKeyAttrName() else False
-                bo = bot.createBO(tr, generate_key)
-                for att_name, value in create_attrs.items():
-                    bo.getBOField(att_name).setValue(value)
-
-            setattr(cls, attr_name, bo)
-
-        if not tr.containsBO(bo):
-            bo = tr.get(bo)
-
-        return bo
+        return assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition)
 
     @classmethod
     def get_match_key(cls):
@@ -385,39 +393,6 @@ class AbstractFactory(object):
         self.processed_count = 0
         self.failed_count = 0
         self.active_target_keys = set()
-
-    @classmethod
-    def as_chained(cls, default_processor_class=None, rules=None):
-        # type: (AbstractProcessor, List[Callable]) -> AbstractFactory
-        """
-        Alternative constructor!
-        This is used when you need a full blown MappingProcessor for ChainedRelationField().
-        The main difference here is that the factory is not fed by its own StageRepository. In
-        fact this nested factory has no own repository but gets fed the records from the superior
-        repository.
-
-        Subclasses that need additional state initialized for chained processing should
-        override :meth:`_init_chained` (which is called by this constructor) rather than
-        re-implementing ``as_chained``.
-        """
-        cls._check_constructor_args(default_processor_class=default_processor_class, rules=rules)
-        inst = cls.__new__(cls)
-        inst.repository = None
-        inst.is_chained = True
-        inst.default_processor_class = default_processor_class
-        inst.rules = rules if rules else []
-        inst.processed_count = 0
-        inst.failed_count = 0
-        inst.active_target_keys = set()
-        inst._init_chained()
-        return inst
-
-    def _init_chained(self):
-        """
-        Hook for subclasses to initialize any additional state required for chained
-        processing. The base implementation does nothing.
-        """
-        pass
 
     @staticmethod
     def _check_constructor_args(source_repository=None, default_processor_class=None, rules=None):
@@ -693,7 +668,11 @@ class MappingProcessor(AbstractProcessor):
             except Exception as e:
                 log_("Could not save value form '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
 
-
+    @classmethod
+    def get_field(cls, field_name):
+        for field in cls.meta.fields:
+            if field.target_field == field_name:
+                return field
 
     @classmethod
     def generate_key(cls):
@@ -703,6 +682,7 @@ class MappingProcessor(AbstractProcessor):
                 return True if target_type.getBusinessKeyAttrName() else False
         else:
             cls._generate_key
+
 
     def pre_process(self): pass
 
@@ -771,6 +751,8 @@ class RelationField(AbstractField):
     """
     def __init__(self, source_field, target_bo_name, target_lookup_field=None, on_not_found_create=None, processor_func=None, target_lookup_func=None, **kwargs):
         super(RelationField, self).__init__(source_field, processor_func)
+        if target_lookup_field and target_lookup_func:
+            raise AssertionError("Either define 'target_lookup_field' or 'target_lookup_func', never both!")
         self.target_bo_name = target_bo_name
         self.target_type = VM.getBOType(target_bo_name)
         self.target_lookup_field = target_lookup_field
@@ -783,6 +765,8 @@ class RelationField(AbstractField):
         """Creates a new related BO based on the on_not_found_create config."""
         source_bo = context.get_source()
         log_("Creating new related object for '%s' in BO '%s'" % (lookup_value, self.target_bo_name), VM.LOG_INFO, source_bo)
+        if callable(self.on_not_found_create):
+            return self.on_not_found_create(context, lookup_value)
 
         attribute_dict = {}
         for field, value_source in self.on_not_found_create.items():
@@ -969,6 +953,34 @@ class RelationField(AbstractField):
 
         context.add_touched_object(related_bo)
 
+class StaticRelationField(RelationField):
+    def __init__(self, value=None, processor_func=None, **kwargs):
+        if value is undefined:
+            assert processor_func, "StaticRelation must have 'value' or 'processor_func' defined."
+            assert target_bo_name in kwargs, "Please provide argument 'target_bo_name' for documentation!"
+            target_bo_name = kwargs.pop("target_bo_name")
+        else:
+            target_bo_name = value.getBOType().getName()
+
+        super(StaticRelationField, self).__init__(
+            source_field=None,
+            target_bo_name=target_bo_name,
+            target_lookup_field=None,
+            on_not_found_create=None,
+            processor_func=processor_func,
+            target_lookup_func=None,
+            **kwargs
+        )
+        self.value = value
+
+
+    def get_processed_value(self, context):
+        if self.processor_func:
+            result = self.processor_func(context, self.value)
+        else:
+            result = self.value
+        return result
+
 class ChainedRelationField(RelationField):
     """
     A specialized RelationField that uses an internal factory to resolve the related BO.
@@ -1006,7 +1018,7 @@ class ChainedRelationField(RelationField):
 
         if result is not undefined:
             context.store_value(self, result)
- 
+
 
 # ==============================================================================
 # 3.2 Helper Classes for RelationField processing
@@ -1304,10 +1316,31 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         super(MappingProcessorFactory, self).__init__(repository, default_processor_class=default_processor_class, rules=rules)
         self._setup_mapping(target_bo_name=target_bo_name, source_key=source_key, target_key=target_key)
 
-    def _init_chained(self):
-        # When built via as_chained() the regular __init__ (and therefore _setup_mapping)
-        # has not run, so the mapping-specific attributes must be initialized here.
-        self._setup_mapping()
+    @classmethod
+    def as_chained(cls, default_processor_class=None, rules=None):
+        # type: (AbstractProcessor, List[Callable]) -> AbstractFactory
+        """
+        Alternative constructor!
+        This is used when you need a full blown MappingProcessor for ChainedRelationField().
+        The main difference here is that the factory is not fed by its own StageRepository. In
+        fact this nested factory has no own repository but gets fed the records from the superior
+        repository.
+
+        Subclasses that need additional state initialized for chained processing should
+        override :meth:`_init_chained` (which is called by this constructor) rather than
+        re-implementing ``as_chained``.
+        """
+        inst = cls.__new__(cls)
+        inst._check_constructor_args(default_processor_class=default_processor_class, rules=rules)
+        inst.repository = None
+        inst.is_chained = True
+        inst.default_processor_class = default_processor_class
+        inst.rules = rules if rules else []
+        inst.processed_count = 0
+        inst.failed_count = 0
+        inst.active_target_keys = set()
+        inst._setup_mapping()
+        return inst
 
     def _setup_mapping(self, target_bo_name=None, source_key=None, target_key=None):
         self.generate_key = None
@@ -1374,7 +1407,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             context = MinimalContext(tr, row_bo, source_key, target_key)
             # Use the field's get_processed_value method instead of calling processor_func directly
             key_value = match_key_field.get_processed_value(context)
-
+        assert key_value, "Data source contains invalid key value '%s' in '%s'." % (key_value, source_key)
         condition = "%s == '%s'" % (target_key, key_value)
         target_bo = get_bo(tr, target_type, condition, strict=True)
 
@@ -1395,7 +1428,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
     def process_all(self, tr, commit_batch_size=None):
         iterator = self.repository.get_unprocessed_records(tr)
         if commit_batch_size:
-            iterator.committedAfter(commit_batch_size)
+            iterator.commitedAfter(commit_batch_size)
 
         for record in iterator:
             # The per-record work lives in process_row(); the loop is only
@@ -1405,7 +1438,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             created = None
             target_bo = None
             try:
-                target_bo, created = self._process_record(tr, record)
+                target_bo, created = self.process_row(tr, record)
                 if target_bo is undefined:
                     continue
                 self._mark_as_processed(record, "PROCESSED")
@@ -1443,8 +1476,8 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         record was skipped (filtered out, no matching processor, or a skipped
         update).
         """
-        target_bo, _created = self._process_record(tr, record)
-        return target_bo
+        target_bo, created = self._process_record(tr, record)
+        return target_bo, created
 
     def _process_record(self, tr, record):
         # type: (ApiTransaction, ApiBObject) -> tuple
@@ -1518,7 +1551,7 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
         # Reuse the shared per-record logic. The parent's source record acts as
         # the staging record here; process_row() handles preparation, filtering,
         # find-or-create and the full processor lifecycle.
-        target_bo = self.process_row(tr, context.get_source())
+        target_bo, _created = self.process_row(tr, context.get_source())
         if target_bo is undefined:
             return undefined
 
@@ -1638,4 +1671,3 @@ class ImportOrchestrator(object):
             log_(traceback.format_exc(), VM.LOG_EXCEPTION)
             raise
         log_("--- Import Orchestrator Finished ---", VM.LOG_INFO)
-
