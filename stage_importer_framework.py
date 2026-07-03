@@ -19,10 +19,12 @@ structure. It is built on several core principles:
 """
 from abc import ABCMeta, abstractmethod, abstractproperty
 import copy
-from de.usu.s3.api import ApiBObject, ApiTransaction, ApiBOType
+from de.usu.s3.api import ApiBObject, ApiTransaction, ApiBOType # type: ignore
 from typing import Any, List, Tuple, Callable
 import traceback
 
+if "VM" not in globals():
+    global VM
 
 __LOG_DOMAIN__ = "Importer"
 undefined = object()
@@ -72,15 +74,15 @@ def log_(message, level, bo=None):
     A centralized logging function that prints to the console for high-level
     messages and writes to the persistent log for all levels.
     """
-    level_map = {VM.LOG_INFO: "INFO", VM.LOG_WARN: "WARNING", VM.LOG_ERROR: "ERROR", VM.LOG_DEBUG: "DEBUG", VM.LOG_EXCEPTION: "EXCEPTION", VM.LOG_FINER: "DEBUG_DETAIL", VM.LOG_FINEST: "TRACE"}
+    level_map = {VM.LOG_INFO: "INFO", VM.LOG_WARN: "WARNING", VM.LOG_ERROR: "ERROR", VM.LOG_DEBUG: "DEBUG", VM.LOG_EXCEPTION: "EXCEPTION", VM.LOG_FINER: "DEBUG_DETAIL", VM.LOG_FINEST: "TRACE"} 
 
     if level in [VM.LOG_INFO, VM.LOG_WARN, VM.LOG_ERROR, VM.LOG_EXCEPTION]:
-        print "%s: %s" % (level_map.get(level, "LOG"), message)
+        print "%s: %s" % (level_map.get(level, "LOG"), message) # type: ignore
 
     VM.persistentLogMessage(__LOG_DOMAIN__, message, None, None, bo, level, False)
 
 
-def get_bo(tr, bo_type, condition, trl_type=VM.TRL_CURRENT, strict=False):
+def get_bo(tr, bo_type, condition, trl_type=VM.TRL_CURRENT, strict=False): # pyright: ignore[reportUndefinedVariable]
     # type: (ApiTransaction, ApiBOType, str, int, bool) -> ApiBObject
     """
     Finds a business object by type and condition, returning the first match.
@@ -117,12 +119,13 @@ def link_nm(source, target, rel_name, **kwargs):
     i = coll.indexOf(target)
     if i < 0:
         coll.add(target)
-    link = coll.linkItem(coll.indexOf(target))
-    if kwargs:
-        for key, value in kwargs.items():
-            link.getBOField(key).setValue(value)
+    if f_coll.isNtoMAssociation():
+        link = coll.linkItem(coll.indexOf(target))
+        if kwargs:
+            for key, value in kwargs.items():
+                link.getBOField(key).setValue(value)
 
-    return link
+        return link
 
 
 def assert_cached_bo(cache_holder, tr, attr_name, bot, create_attrs, condition):
@@ -139,7 +142,7 @@ def assert_cached_bo(cache_holder, tr, attr_name, bot, create_attrs, condition):
         create_attrs (dict): Attributes to use when creating a new BO if it does not exist.
         condition (str): Condition to find the BO in the transaction.
     """
-    bo = getattr(cls, attr_name)
+    bo = getattr(cache_holder, attr_name)
     if not bo:
         bo = get_bo(tr, bot, condition)
         if not bo:
@@ -148,7 +151,7 @@ def assert_cached_bo(cache_holder, tr, attr_name, bot, create_attrs, condition):
             for att_name, value in create_attrs.items():
                 bo.getBOField(att_name).setValue(value)
 
-        setattr(cls, attr_name, bo)
+        setattr(cache_holder, attr_name, bo)
 
     if not tr.containsBO(bo):
         bo = tr.get(bo)
@@ -489,7 +492,7 @@ class AbstractFactory(object):
         return True
 
     def build_processor(self, tr, processor_class, source_bo, target_bo, **kwargs):
-        # type: (ApiTransaction, type, ApiBObject, ApiBObject, **kwargs) -> AbstractProcessor
+        # type: (ApiTransaction, type, ApiBObject, ApiBObject, **Any) -> AbstractProcessor
         """
         Hook that is the single place where processors are instantiated.
 
@@ -504,7 +507,7 @@ class AbstractFactory(object):
         return processor_class(tr, source_bo, target_bo, **kwargs)
 
     def on_target_created(self, tr, target_bo, source_record):
-        # type: (ApiTransaction, ApiBObject, ApiBObject) -> None
+        # type: (ApiTransaction, ApiBObject, ApiBObject, **Any) -> None
         """
         Hook invoked when a brand new target BO has been created for a record.
 
@@ -659,6 +662,9 @@ class MappingProcessor(AbstractProcessor):
                 raise
             except Exception as e:
                 log_("Could not map field '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
+            except:
+                stack_trace = traceback.format_exc()
+                log_(stack_trace, VM.LOG_EXCEPTION, self.source)
             else:
                 queue.append((descriptor, context))
 
@@ -667,6 +673,9 @@ class MappingProcessor(AbstractProcessor):
                 descriptor.set_target_value(context)
             except Exception as e:
                 log_("Could not save value form '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
+            except:
+                stack_trace = traceback.format_exc()
+                log_(stack_trace, VM.LOG_EXCEPTION, self.source)
 
     @classmethod
     def get_field(cls, field_name):
@@ -1641,7 +1650,7 @@ class ImportOrchestrator(object):
             assert isinstance(f, AbstractFactory)
         for r in self.reconcilers:
             assert isinstance(r, AbstractReconciler)
-        self.transaction = tr if tr else transaction
+        self.transaction = tr if tr else transaction  # type: ignore
 
     def run(self, commit_batch_size=None):
         """

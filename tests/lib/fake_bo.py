@@ -48,6 +48,9 @@ class FakeBoField(object):
 
     def isCollectionLink(self):
         return self._is_collection_link
+    
+    def isNtoMAssociation(self):
+        return self.isCollectionLink() 
 
     def setObject(self, obj):
         self.object = obj
