@@ -74,7 +74,7 @@ def log_(message, level, bo=None):
     A centralized logging function that prints to the console for high-level
     messages and writes to the persistent log for all levels.
     """
-    level_map = {VM.LOG_INFO: "INFO", VM.LOG_WARN: "WARNING", VM.LOG_ERROR: "ERROR", VM.LOG_DEBUG: "DEBUG", VM.LOG_EXCEPTION: "EXCEPTION", VM.LOG_FINER: "DEBUG_DETAIL", VM.LOG_FINEST: "TRACE"} 
+    level_map = {VM.LOG_INFO: "INFO", VM.LOG_WARN: "WARNING", VM.LOG_ERROR: "ERROR", VM.LOG_DEBUG: "DEBUG", VM.LOG_EXCEPTION: "EXCEPTION", VM.LOG_FINER: "DEBUG_DETAIL", VM.LOG_FINEST: "TRACE"}
 
     if level in [VM.LOG_INFO, VM.LOG_WARN, VM.LOG_ERROR, VM.LOG_EXCEPTION]:
         print "%s: %s" % (level_map.get(level, "LOG"), message) # type: ignore
@@ -662,6 +662,8 @@ class MappingProcessor(AbstractProcessor):
                 raise
             except Exception as e:
                 log_("Could not map field '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
+                stack_trace = traceback.format_exc()
+                log_(stack_trace, VM.LOG_EXCEPTION, self.source)
             except:
                 stack_trace = traceback.format_exc()
                 log_(stack_trace, VM.LOG_EXCEPTION, self.source)
@@ -673,6 +675,8 @@ class MappingProcessor(AbstractProcessor):
                 descriptor.set_target_value(context)
             except Exception as e:
                 log_("Could not save value form '%s' to target '%s': %s" % (descriptor.source_field, descriptor.target_field, e), VM.LOG_WARN, self.source)
+                stack_trace = traceback.format_exc()
+                log_(stack_trace, VM.LOG_EXCEPTION, self.source)
             except:
                 stack_trace = traceback.format_exc()
                 log_(stack_trace, VM.LOG_EXCEPTION, self.source)
@@ -888,9 +892,9 @@ class RelationField(AbstractField):
             elif self.target_lookup_func:
                 condition = self.target_lookup_func(context, lookup_value)
             else:
-                condition = None
+                condition = undefined
 
-            if condition is not None:
+            if condition is not undefined:
                 related_bo = get_bo(tr, self.target_type, condition, strict=True)
                 if not related_bo and self.on_not_found_create and lookup_value:
                     related_bo = self._create_related_bo(context, lookup_value)
