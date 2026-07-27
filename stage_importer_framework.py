@@ -636,6 +636,20 @@ class ProcessingContext(object):
     def is_update(self):
         return self.processor.is_update
 
+    def get_pending_value(self, field_name):
+        # type: (str) -> Any
+        """
+        During mapping values are not directly set on the target object but
+        stored in a temporary dictionary. This method allows to retrieve allready
+        extracted an processed values for a given field name.
+        Arguments:
+            field_name (str): The name of the mapped field.
+        Returns:
+            The processed value of the field or `undefined` if no value was
+            processed yet.
+        """
+        return self.processor.get_pending_value(field_name)
+
 class MappingProcessor(AbstractProcessor):
     """Default implementation of a Processor"""
     __metaclass__ = ProcessorMetaclass
@@ -647,13 +661,14 @@ class MappingProcessor(AbstractProcessor):
         self.add_touched_object(target_bo)
         self.is_create = is_create
         self.is_update = not is_create
+        self._queue = []
 
     def process(self):
         log_("Applying declarative mappings using %s..." % self.__class__.__name__, VM.LOG_FINER, self.source)
         if not hasattr(self, '__processing_order__'):
             log_("`__processing_order__` not defined for %s. Field processing order is not guaranteed." % self.__class__.__name__, VM.LOG_FINER, self.source)
 
-        queue = []
+        queue = self._queue
         for descriptor in self.meta.fields:
             try:
                 context = ProcessingContext(self, descriptor.source_field, descriptor.target_field)
@@ -696,6 +711,25 @@ class MappingProcessor(AbstractProcessor):
         else:
             cls._generate_key
 
+    def get_pending_value(self, field_name):
+        # type: (str) -> Any
+        """
+        During mapping values are not directly set on the target object but
+        stored in a temporary dictionary. This method allows to retrieve allready
+        extracted an processed values for a given field name.
+        Arguments:
+            field_name (str): The name of the mapped field.
+        Returns:
+            The processed value of the field or `undefined` if no value was
+            processed yet.
+        """        
+        cls = type(self)
+        this_field = cls.get_field(field_name)
+        for field, context in self._queue:
+            if this_field == field:
+                return context.get_value(field)
+        else:
+            return undefined
 
     def pre_process(self): pass
 
