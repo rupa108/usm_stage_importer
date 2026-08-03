@@ -17,6 +17,7 @@ from stage_importer_framework import (
     Static,
     FromSource,
     FromAnywhere,
+    ProcessingContext,
 )
 
 
@@ -146,7 +147,11 @@ class TestMapperFields(unittest.TestCase):
 
     @patch('stage_importer_framework.get_bo')
     def test_relation_field_get_processed_value(self, mock_get_bo):
+        class ProcessorMock(MagicMock):
+            meta = MagicMock()
+            meta.trl_type = "TRL_CURRENT"
         context = MagicMock()
+        context.processor = ProcessorMock()
         tr = MagicMock()
         context.get_transaction.return_value = tr
         
@@ -170,7 +175,7 @@ class TestMapperFields(unittest.TestCase):
         
         value = field.get_processed_value(context)
         self.assertEqual(value, target_bo)
-        mock_get_bo.assert_called_once_with(tr, field.target_type, "name == 'lookup_value'", strict=True)
+        mock_get_bo.assert_called_once_with(tr, field.target_type, "name == 'lookup_value'", trl_type="TRL_CURRENT", strict=True)
         
         # Test with CLEAR_LINK
         mock_get_bo.reset_mock()
@@ -198,7 +203,11 @@ class TestMapperFields(unittest.TestCase):
 
     @patch('stage_importer_framework.get_bo')
     def test_relation_field_map_value(self, mock_get_bo):
+        class ProcessorMock(MagicMock):
+            meta = MagicMock()
+            meta.trl_type = "TRL_CURRENT"
         context = MagicMock()
+        context.processor = ProcessorMock()
         tr = MagicMock()
         context.get_transaction.return_value = tr
         

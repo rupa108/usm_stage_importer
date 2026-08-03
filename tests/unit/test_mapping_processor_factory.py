@@ -75,7 +75,7 @@ class TestMappingProcessorFactory(unittest.TestCase):
             )
 
     def test_create_processor_with_invalid_processor_class(self):
-        with self.assertRaises(TypeError):
+        with self.assertRaises(AssertionError):
             MappingProcessorFactory(
                 repository=StagingRepository(staging_bo_name="ExampleStagingBO"),
                 rules=[(lambda x: True, "not a processor class")],

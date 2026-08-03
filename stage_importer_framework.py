@@ -429,6 +429,7 @@ class AbstractFactory(object):
         if rules:
             for func, cls in rules:
                 assert callable(func), "Matcher must be a callable function."
+                assert isinstance(cls, type), "Processor must be a class, not an object!"
                 assert issubclass(cls, AbstractProcessor), "Processor class %s must be a subclass of AbstractProcessor" % cls.__name__
 
     @abstractmethod
