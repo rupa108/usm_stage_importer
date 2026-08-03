@@ -234,79 +234,107 @@ class AbstractField(object):
     def _assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition):
         return assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition)
 
-class ProcessorMetaclass(ABCMeta):
-    """
-    A metaclass that captures the declaration order of FieldDescriptors
-    on RecordProcessor subclasses if `__processing_order__` is defined.
-    """
-    def __new__(cls, name, bases, attrs):
-        class_meta = attrs.pop("Meta", None)
-        if class_meta is None:
-            meta = None
-            for base in bases:
-                if hasattr(base, "meta"):
-                    meta = copy.deepcopy(getattr(base, "meta"))
-                    break
-            if meta is None:
-                meta = type("Meta", (), {})()
-        else:
-            meta = class_meta()
+class AbstractProcessorMetaclass(ABCMeta):
+    """Handles core Meta object extraction and defaults for all processors."""
 
-        descr_dict = {}
+    def __new__(mcs, name, bases, attrs):
+        if "meta" not in attrs:
+            attrs["meta"] = mcs._extract_meta(bases, attrs)
+
+        meta = attrs["meta"]
+
+        if not hasattr(meta, "collect_bos"):
+            meta.collect_bos = True
+
+        if not hasattr(meta, "include_inactive"):
+            meta.include_inactive = False
+        meta.trl_type = VM.TRL_ALL if meta.include_inactive else VM.TRL_CURRENT
+
+        return super(AbstractProcessorMetaclass, mcs).__new__(mcs, name, bases, attrs)
+
+    @classmethod
+    def _extract_meta(mcs, bases, attrs):
+        class_meta = attrs.pop("Meta", None)
+        if class_meta is not None:
+            return class_meta()
 
         for base in bases:
             if hasattr(base, "meta"):
-                base_meta = getattr(base, "meta")
-                if hasattr(base_meta, "fields"):
-                    for field in base_meta.fields:
-                        descr_dict[field.target_field] = field
+                return copy.deepcopy(getattr(base, "meta"))
+
+        return type("Meta", (), {})()
+
+class MappingProcessorMetaclass(AbstractProcessorMetaclass):
+    """Metaclass for MappingProcessor"""
+    def __new__(mcs, name, bases, attrs):
+        if "meta" not in attrs:
+            attrs["meta"] = mcs._extract_meta(bases, attrs)
+
+        meta = attrs["meta"]
+
+        descr_dict = {}
+        for base in bases:
+            if hasattr(base, "meta") and hasattr(base.meta, "fields"):
+                for field in base.meta.fields:
+                    descr_dict[field.target_field] = field
+
         for attr_name, attr_value in attrs.items():
             if isinstance(attr_value, AbstractField):
                 descr_dict[attr_name] = attr_value
 
-        ordered_descriptors = []
-
         if '__processing_order__' in attrs:
-            # If order is specified, enforce it
-            processing_order = attrs['__processing_order__']
-            for field_name in processing_order:
-                try:
-                    descriptor = descr_dict[field_name]
-                except KeyError:
-                    raise TypeError(
-                        "Field '%s' listed in `__processing_order__` is not defined in class %s." % (field_name, name)
-                    )
-                if not isinstance(descriptor, AbstractField):
-                    raise TypeError(
-                        "Field '%s' listed in `__processing_order__` is not a "
-                        "valid FieldDescriptor instance in class %s. %s" % (field_name, name, descriptor)
-                    )
-                descriptor.target_field = field_name
-                ordered_descriptors.append(descriptor)
+            ordered_descriptors = mcs._process_explicit_order(name, attrs['__processing_order__'], descr_dict)
         else:
-            # If no order is specified, discover fields and order as they were declared
-            discovered_descriptors = []
-            for field_name, descriptor in descr_dict.items():
-                descriptor.set_target_field(field_name)
-                discovered_descriptors.append(descriptor)
-            ordered_descriptors = sorted(discovered_descriptors, key=lambda x: x._creation_counter)
+            ordered_descriptors = mcs._process_declared_order(descr_dict)
 
-        # remove descriptor fields from their original location in order to clean up the scope
-        for attr_name, attr_value in attrs.items():
-            if isinstance(attr_value, AbstractField):
+        # Remove field descriptors from class scope
+        for attr_name in list(attrs.keys()):
+            if isinstance(attrs[attr_name], AbstractField):
                 del attrs[attr_name]
 
         meta.fields = ordered_descriptors
+
         target_bo_name = getattr(meta, "target_bo_name", None)
         if target_bo_name:
             meta.target_type = VM.getBOType(target_bo_name)
-        attrs["meta"] = meta
 
-        return super(ProcessorMetaclass, cls).__new__(cls, name, bases, attrs)
+        return super(MappingProcessorMetaclass, mcs).__new__(mcs, name, bases, attrs)
 
+    @staticmethod
+    def _process_explicit_order(class_name, processing_order, descr_dict):
+        ordered = []
+        for field_name in processing_order:
+            if field_name not in descr_dict:
+                raise TypeError("Field '%s' in `__processing_order__` not found in %s." % (field_name, class_name))
+            descriptor = descr_dict[field_name]
+            if not isinstance(descriptor, AbstractField):
+                raise TypeError("Field '%s' is not a valid FieldDescriptor in %s." % (field_name, class_name))
+            descriptor.target_field = field_name
+            ordered.append(descriptor)
+        return ordered
+
+    @staticmethod
+    def _process_declared_order(descr_dict):
+        discovered = []
+        for field_name, descriptor in descr_dict.items():
+            descriptor.set_target_field(field_name)
+            discovered.append(descriptor)
+        return sorted(discovered, key=lambda x: x._creation_counter)
+
+class RelationshipProcessorMetaclass(AbstractProcessorMetaclass):
+    """Metaclass for RelationProcessor"""
+    def __new__(mcs, name, bases, attrs):
+        if "meta" not in attrs:
+            attrs["meta"] = mcs._extract_meta(bases, attrs)
+
+        meta = attrs["meta"]
+        # No logic yet. Place for future enhancements
+
+        return super(RelationshipProcessorMetaclass, mcs).__new__(mcs, name, bases, attrs)
 
 class AbstractProcessor(object):
     """Base class for processing a single record and tracking touched objects."""
+    __metaclass__ = AbstractProcessorMetaclass
 
     def __init__(self, tr, source_bo, target_bo, **kwargs):
         self.transaction = tr
@@ -337,7 +365,8 @@ class AbstractProcessor(object):
         """
         Adds a touched business object to the processor's internal set.
         This is used to track which objects were modified or created during processing."""
-        if bo:
+        cls = type(self)
+        if bo and cls.meta.collect_bos:
             self._touched_objects.add(bo)
 
     @abstractmethod
@@ -352,14 +381,6 @@ class AbstractProcessor(object):
     @classmethod
     def _assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition):
         return assert_cached_bo(cls, tr, attr_name, bot, create_attrs, condition)
-
-    @classmethod
-    def get_match_key(cls):
-        result = None
-        for field in getattr(cls.meta, "fields", []):
-            if field.match_key:
-                result = field
-        return result
 
 
 class AbstractRepository(object):
@@ -597,11 +618,12 @@ class AbstractReconciliationBaseline(object):
 
 class ProcessingContext(object):
     """Provides a controlled context to a custom processor function."""
-    def __init__(self, processor, source_field_name, target_field_name):
+    def __init__(self, processor, source_field_name, target_field_name, collect_bos=True):
         self.processor = processor
         self.source_field_name = source_field_name
         self.target_field_name = target_field_name
         self._value_store = {}
+        self.collect_bos = collect_bos # Hook for mem optimization
 
     def store_value(self, field, value):
         # type: (AbstractField, Any) -> None
@@ -622,7 +644,8 @@ class ProcessingContext(object):
     target = property(get_target)
 
     def add_touched_object(self, bo):
-        self.processor.add_touched_object(bo)
+        if bo and self.collect_bos:
+            self.processor.add_touched_object(bo)
 
     def get_transaction(self):
         return self.processor.transaction
@@ -638,7 +661,7 @@ class ProcessingContext(object):
 
 class MappingProcessor(AbstractProcessor):
     """Default implementation of a Processor"""
-    __metaclass__ = ProcessorMetaclass
+    __metaclass__ = MappingProcessorMetaclass
 
     _generate_key = None
 
@@ -648,6 +671,14 @@ class MappingProcessor(AbstractProcessor):
         self.is_create = is_create
         self.is_update = not is_create
 
+    @classmethod
+    def get_match_key(cls):
+        result = None
+        for field in getattr(cls.meta, "fields", []):
+            if field.match_key:
+                result = field
+        return result
+
     def process(self):
         log_("Applying declarative mappings using %s..." % self.__class__.__name__, VM.LOG_FINER, self.source)
         if not hasattr(self, '__processing_order__'):
@@ -656,7 +687,7 @@ class MappingProcessor(AbstractProcessor):
         queue = []
         for descriptor in self.meta.fields:
             try:
-                context = ProcessingContext(self, descriptor.source_field, descriptor.target_field)
+                context = ProcessingContext(self, descriptor.source_field, descriptor.target_field, collect_bos=type(self).meta.collect_bos)
                 descriptor.map_value(context)
             except ValidationError as e:
                 raise
@@ -895,7 +926,9 @@ class RelationField(AbstractField):
                 condition = undefined
 
             if condition is not undefined:
-                related_bo = get_bo(tr, self.target_type, condition, strict=True)
+                processor_class = type(context.processor)
+                trl_type = processor_class.meta.trl_type
+                related_bo = get_bo(tr, self.target_type, condition, trl_type=trl_type, strict=True)
                 if not related_bo and self.on_not_found_create and lookup_value:
                     related_bo = self._create_related_bo(context, lookup_value)
 
@@ -967,32 +1000,18 @@ class RelationField(AbstractField):
         context.add_touched_object(related_bo)
 
 class StaticRelationField(RelationField):
-    def __init__(self, value=None, processor_func=None, **kwargs):
-        if value is undefined:
-            assert processor_func, "StaticRelation must have 'value' or 'processor_func' defined."
-            assert target_bo_name in kwargs, "Please provide argument 'target_bo_name' for documentation!"
-            target_bo_name = kwargs.pop("target_bo_name")
-        else:
-            target_bo_name = value.getBOType().getName()
+    def __init__(self, target_bo_name, target_lookup_field, lookup_value, on_not_found_create=None, **kwargs):
+        self._lookup_value = lookup_value
+        self._related_bo = None
+        super(StaticRelationField, self).__init__(None, target_bo_name, target_lookup_field, on_not_found_create, **kwargs)
 
-        super(StaticRelationField, self).__init__(
-            source_field=None,
-            target_bo_name=target_bo_name,
-            target_lookup_field=None,
-            on_not_found_create=None,
-            processor_func=processor_func,
-            target_lookup_func=None,
-            **kwargs
-        )
-        self.value = value
-
+    def get_lookup_value(self, context):
+        return self._lookup_value
 
     def get_processed_value(self, context):
-        if self.processor_func:
-            result = self.processor_func(context, self.value)
-        else:
-            result = self.value
-        return result
+        if not self._related_bo:
+            self._related_bo = super(StaticRelationField, self).get_processed_value(context)
+        return self._related_bo
 
 class ChainedRelationField(RelationField):
     """
@@ -1097,6 +1116,7 @@ class RelationshipProcessor(AbstractProcessor):
         It must be subclassed!
 
     """
+    __metaclass__ = RelationshipProcessorMetaclass
     # Subclasses must define this attribute
     rel_attr_name = None  # The name of the relationship attribute on the source BO.
 
@@ -1273,12 +1293,14 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
         ProcessorClass = self._get_processor_class(tr, row_bo)
         # Hook A: route processor instantiation through the build hook.
         processor = self.build_processor(tr, ProcessorClass, source_bo, target_bo, row_bo=row_bo)
-        processor.pre_process()
-        processor.process()
-        processor.post_process()
-        self.active_target_keys.add(source_bo.getMoniker())
-        self.active_target_keys.add(target_bo.getMoniker())
-        self.active_target_keys.update(processor.get_active_keys())
+        try:
+            processor.pre_process()
+            processor.process()
+            processor.post_process()
+        finally:
+            self.active_target_keys.add(source_bo.getMoniker())
+            self.active_target_keys.add(target_bo.getMoniker())
+            self.active_target_keys.update(processor.get_active_keys())
         return target_bo
 
     def _process_row(self, tr, row_bo):
@@ -1422,7 +1444,8 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
             key_value = match_key_field.get_processed_value(context)
         assert key_value, "Data source contains invalid key value '%s' in '%s'." % (key_value, source_key)
         condition = "%s == '%s'" % (target_key, key_value)
-        target_bo = get_bo(tr, target_type, condition, strict=True)
+        trl_type = processor_class.meta.trl_type
+        target_bo = get_bo(tr, target_type, condition, trl_type=trl_type, strict=True)
 
         return target_bo
 
@@ -1531,9 +1554,14 @@ class MappingProcessorFactory(_RulesMixin, AbstractFactory):
 
         # Hook A: route processor instantiation through the build hook.
         processor_instance = self.build_processor(tr, processor_class, source_record, target_bo, is_create=created)
-        processor_instance.pre_process()
-        processor_instance.process()
-        processor_instance.post_process()
+        try:
+            processor_instance.pre_process()
+            processor_instance.process()
+            processor_instance.post_process()
+        except:
+            if not created:
+                self.active_target_keys.update(processor_instance.get_active_keys())
+            raise
 
         self.active_target_keys.update(processor_instance.get_active_keys())
 
