@@ -20,9 +20,14 @@ structure. It is built on several core principles:
 from abc import ABCMeta, abstractmethod, abstractproperty
 import copy
 from de.usu.s3.api import ApiBObject, ApiTransaction, ApiBOType # type: ignore
+
 from typing import Any, List, Tuple, Callable
 import traceback
 
+# needed for deepcopy on meta in meta class
+ApiBOType.__deepcopy__ = lambda self, memo: self
+
+# needed for IDEs not to show warnings
 if "VM" not in globals():
     global VM
 
