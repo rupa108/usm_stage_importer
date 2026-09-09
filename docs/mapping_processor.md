@@ -230,7 +230,11 @@ from stage_importer_framework import (
     MappingProcessor,
     PlainField,
     StaticField,
-    RelationField
+    RelationField,
+    ValidationError,
+    FromSource,
+    undefined,
+    
 )
 
 # Used to create a new coutry record if the one we are looking for doesn't exist.
@@ -239,21 +243,27 @@ create_country_dict = {
     "name": FromSource("countryName"),
 }
 
+def only_on_create(context, value):
+    if context.is_create:
+        return value
+    else:
+        return undefined
+
 class CompanyProcessor(MappingProcessor):
     # Match key for finding existing records
     company_id = PlainField(
-        source_field="COMPANY_ID",
+        source_field="companyId",
         match_key=True
     )
     
     # Simple field mapping with transformation
     name = PlainField(
-        source_field="COMPANY_NAME",
+        source_field="companyName",
         processor_func=lambda ctx, val: val.strip().upper()
     )
     
     # Static value
-    status = StaticField(value="ACTIVE")
+    status = StaticField(value="ACTIVE", processor_func=only_on_create)
     
     # Related object mapping
     country = RelationField(
@@ -271,15 +281,15 @@ class CompanyProcessor(MappingProcessor):
     
     def pre_process(self):
         """Validate source data before mapping"""
-        if not self.source.getBOField("COMPANY_ID").getValue():
-            raise ValidationError("COMPANY_ID is required")
+        if not self.source.getBOField("companyId").getValue():
+            raise ValidationError("companyId is required")
     
     def post_process(self):
         """Custom logic after all fields are mapped"""
         # Set created date if this is a new record
         if self.is_create:
             import datetime
-            self.target.getBOField("created_date").setValue(
+            self.target.getBOField("createdDate").setValue(
                 datetime.datetime.now()
             )
 ```
