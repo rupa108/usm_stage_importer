@@ -79,6 +79,75 @@ def json_obj_to_dict(json_obj):  #type: (json_obj: org.json.JSONObject) -> dict
             result[k]= val
     return result
 
+
+def only_on_reactivate(context, value):
+    target_bo = context.target
+    if is_valid(target_bo):
+        return undefined
+    else:
+        return value
+
+def is_valid(bo, when=None, validto_name="validto", validfrom_name="validfrom"):
+    # type: (bo:ApiBObject, when:Date, validto_name:str, validfrom_name:str) -> bool
+    """
+    Checks if given BO is in the validity window "validfrom to validto".
+    The check date defaults to "now". This can be overwritten with the "when" argument.
+
+    Arguments:
+        bo: The BO to check.
+        when: Optional date as check reference.
+        validto_name: Name of the validto attribute.
+        validfrom_name: Name of the validfrom attribute.
+    """
+    f_validto = bo.getBOField(validto_name)
+    f_validfrom = bo.getBOField(validfrom_name)
+    t_validto = f_validto.getType()
+    t_validfrom = f_validfrom.getType()
+    q_list = []
+    for field_name, cmp_oper, datetime_value in (validfrom_name, "<=", when), (validto_name, ">=", when):
+        field = bo.getBOField(field_name)
+        date_type = field.getType()
+
+        if datetime_value is None:
+            if date_type == 'java.sql.Timestamp':
+                compare_value = "currentTimeStamp()"
+            else:
+                compare_value = "currentDate()"
+        else:
+            compare_value = str(when)
+
+        q_list.append("%s %s %s" % (field_name, cmp_oper, compare_value))
+
+    match_condition = ' && '.join(q_list)
+
+    return bo.matchCondition(match_condition)		
+	
+def set_validto(bo, validto_date=None, validto_name="validto", validfrom_name="validfrom"): #type: (bo: ApiBObject, validto_date: Date, validto_name: str, validfrom_name: str) -> ApiBObject
+    """
+    Utility for setting validto.
+    Calculates the propper value for validto if not provided.
+    Makes sure validto will not be set to a date before validfrom.
+    """
+    f_validto = bo.getBOField(validto_name)
+    t_validto = f_validto.getType()
+
+    if validto_date is None:
+        if t_validto == 'java.sql.Timestamp':
+            now = VM.getFunctionProvider().getCurrentTimestamp()
+            validto_date = calc_date(now, days=-1, convert=True) # type: Timestamp
+        else:
+            today = VM.getFunctionProvider().getCurrentDate()
+            validto_date = calc_date(today, days=-1) # type: Date
+
+    bo.getBOField(validto_name).setValue(validto_date)
+
+    f_valid_from = bo.getBOField(validfrom_name)
+    validfrom_date = f_valid_from.getValue()
+    if validto_date.before(validfrom_date):
+        f_valid_from.setValue(validto_date)
+
+    return bo
+	
 ################################################################
 # Mutex
 from vm.tools.boa import pyBOT, PyBO
