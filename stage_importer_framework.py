@@ -759,7 +759,7 @@ class MappingProcessor(AbstractProcessor):
         Returns:
             The processed value of the field or `undefined` if no value was
             processed yet.
-        """        
+        """
         cls = type(self)
         this_field = cls.get_field(field_name)
         for field, context in self._queue:
@@ -1328,7 +1328,7 @@ class RelationProcessorFactoryBase(_RulesMixin, AbstractFactory):
         source_bo = self.get_source_bo(tr, row_bo)
         target_bo = self.get_target_bo(tr, row_bo)
         if not source_bo or not target_bo:
-            log_("Source or target BO not found for row: %s" % row_bo.getMoniker(), VM.LOG_WARN, row_bo)
+            log_("Source or target BO not found for row: %s" % row_bo.getMoniker(), VM.LOG_DEBUG, row_bo)
             return undefined
         ProcessorClass = self._get_processor_class(tr, row_bo)
         # Hook A: route processor instantiation through the build hook.
